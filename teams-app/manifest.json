@@ -1,0 +1,76 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "{{BOT_APP_ID}}",
+  "developer": {
+    "name": "Your organisation",
+    "websiteUrl": "https://{{BOT_HOST}}",
+    "privacyUrl": "https://{{BOT_HOST}}/privacy",
+    "termsOfUseUrl": "https://{{BOT_HOST}}/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Aria",
+    "full": "Aria - Realtime Voice Meeting Agent"
+  },
+  "description": {
+    "short": "An AI colleague you can talk to in a Teams meeting.",
+    "full": "Aria joins a Microsoft Teams meeting as a participant, listens, and answers out loud in real time. She can look things up across your Microsoft 365 working data through Work IQ and post a written record of the conversation into the meeting chat. Aria only replies when addressed by name."
+  },
+  "accentColor": "#2B5797",
+  "bots": [
+    {
+      "botId": "{{BOT_APP_ID}}",
+      "scopes": [
+        "personal",
+        "team",
+        "groupChat"
+      ],
+      "supportsCalling": true,
+      "supportsVideo": false,
+      "isNotificationOnly": false,
+      "supportsFiles": false
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "{{BOT_HOST}}"
+  ],
+  "webApplicationInfo": {
+    "id": "{{BOT_APP_ID}}",
+    "resource": "https://RscBasedStoreApp"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "name": "Calls.JoinGroupCalls.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "Calls.AccessMedia.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "OnlineMeetingParticipant.Read.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "ChatMessage.Send.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "ChatMessage.Read.Chat",
+          "type": "Application"
+        }
+      ]
+    }
+  }
+}

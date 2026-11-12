@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+artifacts/
+
+# Local state and secrets — never commit
+.devicecode.json
+.workiq-refresh.txt
+*.pfx
+*.p12
+appsettings.Development.json
+appsettings.Production.json
+local.settings.json
+.env
+scripts/deployment.local.ps1
+
+# Editor
+.vs/
+.idea/
+*.user
+
+# Rendered deployment scripts contain live configuration
+artifacts-*.ps1
+
+meeting-link.txt

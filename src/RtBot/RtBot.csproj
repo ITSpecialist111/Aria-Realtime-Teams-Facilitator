@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- .NET 8 left support on 2026-11-10. The media SDK ships net8.0 assets only; they load on net10. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The Teams media stack is native x64. AnyCPU restores but fails at runtime. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>RtBot</AssemblyName>
+    <RootNamespace>RtBot</RootNamespace>
+    <UserSecretsId>rtbot-teams-realtime-voice</UserSecretsId>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup Label="Teams real-time media">
+    <!-- Explicit reference required even though it is transitive: the package carries
+         native assets and install scripts that only flow on a direct reference. -->
+    <PackageReference Include="Microsoft.Skype.Bots.Media" Version="1.33.0.258-preview" />
+    <!-- Versions older than ~3 months stop working against the Teams service. -->
+    <PackageReference Include="Microsoft.Graph.Communications.Calls.Media" Version="1.2.0.18742" />
+  </ItemGroup>
+
+  <ItemGroup Label="Realtime voice">
+    <PackageReference Include="Azure.AI.VoiceLive" Version="1.2.1" />
+    <!-- Azure.Core absorbed the Azure.Identity credential types; referencing the
+         standalone package as well produces duplicate-type errors. -->
+    <PackageReference Include="Azure.Core" Version="1.65.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Tools / MCP">
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Identity.Client" Version="4.92.0" />
+    <PackageReference Include="Azure.Security.KeyVault.Secrets" Version="4.8.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Observability (Agent 365)">
+    <PackageReference Include="Microsoft.OpenTelemetry" Version="1.2.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Platform">
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

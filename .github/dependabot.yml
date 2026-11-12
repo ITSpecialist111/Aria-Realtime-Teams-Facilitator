@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /src/RtBot
+    schedule:
+      interval: weekly
+  - package-ecosystem: nuget
+    directory: /tools/RtBot.Verify
+    schedule:
+      interval: weekly

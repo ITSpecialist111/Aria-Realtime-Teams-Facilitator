@@ -8,10 +8,28 @@ Aria joins a Teams meeting as a participant, listens to the whole conversation, 
 
 > Status: working proof of concept. It runs end to end against a real tenant. See [Limitations](#limitations) before relying on it.
 
+## Demo
+
+[![Aria in a Teams meeting. Click to play the demo video with audio.](docs/media/aria-in-meeting.png)](docs/media/aria-demo.mp4)
+
+*57-second unedited clip from a live Teams meeting (click the image to play, with audio). The bot's resource name is masked.*
+
+What you hear (transcript of the clip):
+
+> **Aria:** …capturing decisions, action items and summaries. What would you like me to do?
+> **Host:** Morning all. This is our weekly sync for the Contoso rollout. Aria, can you keep notes for us today?
+> **Aria:** Got it. I'll capture notes and keep track of decisions and action items as you go.
+> **Host:** Aria, what meetings do we have coming up this week?
+> **Aria:** I'll quickly check your calendar for the week, and then I'll summarise what's coming up.
+> **Host:** Which of those look most important?
+
+The clip shows the spoken introduction, answering when addressed by name, and the start of a Work IQ calendar lookup. The lookup's answer is not in this clip: that call timed out during this recording.
+
 ---
 
 ## Contents
 
+- [Demo](#demo)
 - [What it does](#what-it-does)
 - [How it compares](#how-it-compares)
 - [Architecture](#architecture)

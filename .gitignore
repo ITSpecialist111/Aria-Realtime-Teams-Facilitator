@@ -23,3 +23,5 @@ scripts/deployment.local.ps1
 artifacts-*.ps1
 
 meeting-link.txt
+
+/Screen Recording*.mp4

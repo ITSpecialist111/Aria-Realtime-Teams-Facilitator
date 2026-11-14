@@ -349,6 +349,43 @@ internal sealed class BotStartupService : IHostedService
     {
         _calling.Initialize();
         await RegisterToolsAsync(cancellationToken).ConfigureAwait(false);
+
+        if (_pending.Count > 0)
+        {
+            _retryLoop = Task.Run(() => RetryPendingAsync(_stopping.Token), CancellationToken.None);
+        }
+    }
+
+    private readonly List<McpServerOptions> _pending = [];
+    private readonly CancellationTokenSource _stopping = new();
+    private Task? _retryLoop;
+
+    /// <summary>Keeps trying servers that were down at start-up, so one outage doesn't cost the tools until the next restart.</summary>
+    private async Task RetryPendingAsync(CancellationToken cancellationToken)
+    {
+        TimeSpan delay = TimeSpan.FromSeconds(30);
+        while (_pending.Count > 0 && !cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            foreach (McpServerOptions server in _pending.ToList())
+            {
+                if (await TryAddServerAsync(server, cancellationToken).ConfigureAwait(false))
+                {
+                    _pending.Remove(server);
+                    _logger.LogWarning("MCP server {Server} connected after retry; catalog now has {Count} tools.", server.Name, _tools.Definitions.Count);
+                }
+            }
+
+            delay = TimeSpan.FromSeconds(Math.Min(600, delay.TotalSeconds * 2));
+        }
     }
 
     private async Task RegisterToolsAsync(CancellationToken cancellationToken)
@@ -376,18 +413,31 @@ internal sealed class BotStartupService : IHostedService
         _logger.LogInformation("Tool catalog ready with {Count} tools.", _tools.Definitions.Count);
     }
 
-    private async Task TryAddServerAsync(McpServerOptions server, CancellationToken cancellationToken)
+    private async Task<bool> TryAddServerAsync(McpServerOptions server, CancellationToken cancellationToken)
     {
         try
         {
-            await _tools.AddMcpServerAsync(server, _tokenProvider, cancellationToken).ConfigureAwait(false);
+            return await _tools.AddMcpServerAsync(server, _tokenProvider, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             // A tool server being unreachable degrades the agent; it must not stop it starting.
             _logger.LogError(ex, "Could not register MCP server {Server}.", server.Name);
+            if (!_pending.Contains(server))
+            {
+                _pending.Add(server);
+            }
+
+            return false;
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _stopping.CancelAsync().ConfigureAwait(false);
+        if (_retryLoop is not null)
+        {
+            await _retryLoop.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
 }

@@ -21,6 +21,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     private const int MaxReconnectAttempts = 5;
     private static readonly TimeSpan MaxWaitForGap = TimeSpan.FromSeconds(8);
 
+    // Longer than Work IQ's normal 10-15 s, short enough that the meeting isn't left waiting.
+    private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(25);
+
     private readonly VoiceOptions _options;
     private readonly VoiceLiveClient _client;
     private readonly ILogger<VoiceLiveBridge> _logger;
@@ -35,6 +38,7 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     private OutboundAudioPacer? _pacer;
     private Task? _receiveLoop;
     private int _pendingToolOutputs;
+    private int _toolsInFlight;
     private int _disposed;
     private volatile bool _someoneSpeaking;
     private volatile bool _responseActive;
@@ -431,7 +435,11 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
 
             case SessionUpdateResponseDone:
                 _responseActive = false;
-                await FlushToolOutputsAsync(session, cancellationToken).ConfigureAwait(false);
+                if (Volatile.Read(ref _toolsInFlight) == 0)
+                {
+                    await FlushToolOutputsAsync(session, cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
 
             case SessionUpdateError error:
@@ -576,30 +584,63 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
         _logger.LogInformation("Barge-in after {Played}ms of playback.", (int)cut.PlayedDuration.TotalMilliseconds);
     }
 
-    private async Task DispatchToolCallAsync(
+    private Task DispatchToolCallAsync(
         VoiceLiveSession session,
         SessionUpdateResponseFunctionCallArgumentsDone call,
         CancellationToken cancellationToken)
     {
         _logger.LogInformation("Tool call {Name}", call.Name);
 
-        string output;
-        try
+        // Off the receive loop: a 15 s Work IQ call would otherwise hold back the interim
+        // filler audio and every other update until it returned.
+        Interlocked.Increment(ref _toolsInFlight);
+        _ = Task.Run(async () =>
         {
-            output = _tools is null
-                ? JsonSerializer.Serialize(new { error = "No tools are available." })
-                : await _tools.InvokeAsync(call.Name, call.Arguments, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Tool {Name} threw.", call.Name);
-            output = JsonSerializer.Serialize(new { error = ex.Message });
-        }
+            string output;
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(ToolTimeout);
+            try
+            {
+                output = _tools is null
+                    ? JsonSerializer.Serialize(new { error = "No tools are available." })
+                    : await _tools.InvokeAsync(call.Name, call.Arguments, timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Tool {Name} failed.", call.Name);
+                output = JsonSerializer.Serialize(new
+                {
+                    error = timeout.IsCancellationRequested
+                        ? "The service did not respond in time."
+                        : "The service is unavailable right now.",
+                    instruction = "Tell the person briefly that you couldn't get that information just now and offer to try again later. Do not guess the answer.",
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
 
-        await session.AddItemAsync(new FunctionCallOutputItem(call.CallId, output), cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await session.AddItemAsync(new FunctionCallOutputItem(call.CallId, output), cancellationToken).ConfigureAwait(false);
+                Interlocked.Increment(ref _pendingToolOutputs);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not return the output of tool {Name}.", call.Name);
+            }
+            finally
+            {
+                // Whichever finishes last, this or response.done, asks for the follow-up response.
+                if (Interlocked.Decrement(ref _toolsInFlight) == 0 && !_responseActive)
+                {
+                    await FlushToolOutputsAsync(session, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }, CancellationToken.None);
 
-        // Arrives mid-response; a new response is requested once on response.done.
-        Interlocked.Increment(ref _pendingToolOutputs);
+        return Task.CompletedTask;
     }
 
     private async Task FlushToolOutputsAsync(VoiceLiveSession session, CancellationToken cancellationToken)

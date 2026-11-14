@@ -28,15 +28,27 @@ public sealed class ToolCatalog : IAsyncDisposable
     private readonly ConcurrentQueue<ToolInvocation> _recent = new();
     private readonly ILogger<ToolCatalog> _logger;
 
+    // Servers can be registered by the background retry while calls are reading the catalogue.
+    private readonly object _gate = new();
+
     public ToolCatalog(ILogger<ToolCatalog> logger) => _logger = logger;
 
-    public IReadOnlyList<VoiceLiveToolDefinition> Definitions => _definitions;
+    public IReadOnlyList<VoiceLiveToolDefinition> Definitions
+    {
+        get { lock (_gate) { return [.. _definitions]; } }
+    }
 
     /// <summary>The same tools in a model-agnostic form, for the text model and per-call toolsets.</summary>
-    public IReadOnlyList<ToolSpec> Specs => _specs;
+    public IReadOnlyList<ToolSpec> Specs
+    {
+        get { lock (_gate) { return [.. _specs]; } }
+    }
 
     /// <summary>Names of every registered tool, in the form the model sees them.</summary>
-    public IReadOnlyCollection<string> ToolNames => _bindings.Keys;
+    public IReadOnlyCollection<string> ToolNames
+    {
+        get { lock (_gate) { return [.. _bindings.Keys]; } }
+    }
 
     /// <summary>The most recent tool invocations, newest last. Diagnostics only.</summary>
     public IReadOnlyCollection<ToolInvocation> RecentInvocations => _recent.ToArray();
@@ -48,18 +60,21 @@ public sealed class ToolCatalog : IAsyncDisposable
         BinaryData parametersSchema,
         Func<JsonElement, CancellationToken, Task<string>> handler)
     {
-        _definitions.Add(new VoiceLiveFunctionDefinition(name)
+        lock (_gate)
         {
-            Description = description,
-            Parameters = parametersSchema,
-        });
+            _definitions.Add(new VoiceLiveFunctionDefinition(name)
+            {
+                Description = description,
+                Parameters = parametersSchema,
+            });
 
-        _specs.Add(new ToolSpec(name, description, parametersSchema.ToString(), AccessesOrganisationData: false));
-        _bindings[name] = new ToolBinding(name, handler);
+            _specs.Add(new ToolSpec(name, description, parametersSchema.ToString(), AccessesOrganisationData: false));
+            _bindings[name] = new ToolBinding(name, handler);
+        }
     }
 
-    /// <summary>Connects to a remote MCP server and registers every tool it advertises.</summary>
-    public async Task AddMcpServerAsync(
+    /// <summary>Connects to a remote MCP server and registers every tool it advertises. Returns false if it could not.</summary>
+    public async Task<bool> AddMcpServerAsync(
         McpServerOptions server,
         IDelegatedTokenProvider tokenProvider,
         CancellationToken cancellationToken)
@@ -79,12 +94,11 @@ public sealed class ToolCatalog : IAsyncDisposable
                     "Skipping MCP server {Server}: no delegated token for scope {Scope}.",
                     server.Name,
                     server.Scope);
-                return;
+                return false;
             }
 
             // A handler, not a static header: the token expires long before the process does.
             httpClient = new HttpClient(new DelegatedAuthHandler(tokenProvider, server.Scope));
-            _httpClients.Add(httpClient);
         }
 
         HttpClientTransportOptions transportOptions = new()
@@ -93,57 +107,80 @@ public sealed class ToolCatalog : IAsyncDisposable
             Name = server.Name,
         };
 
-        McpClient client = await McpClient.CreateAsync(
-            httpClient is null
-                ? new HttpClientTransport(transportOptions)
-                : new HttpClientTransport(transportOptions, httpClient),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        _clients.Add(client);
-
-        IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-
-        foreach (McpClientTool tool in tools)
+        McpClient client;
+        IList<McpClientTool> tools;
+        try
         {
-            // Several servers can advertise the same verb, so names are namespaced.
-            string exposedName = Sanitise($"{server.Name}_{tool.Name}");
+            client = await McpClient.CreateAsync(
+                httpClient is null
+                    ? new HttpClientTransport(transportOptions)
+                    : new HttpClientTransport(transportOptions, httpClient),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            if (_bindings.ContainsKey(exposedName))
+            tools = await client.ListToolsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            httpClient?.Dispose();
+            throw;
+        }
+
+        lock (_gate)
+        {
+            _clients.Add(client);
+            if (httpClient is not null)
             {
-                _logger.LogWarning("Duplicate tool name {Name}; skipping.", exposedName);
-                continue;
+                _httpClients.Add(httpClient);
             }
 
-            _definitions.Add(new VoiceLiveFunctionDefinition(exposedName)
+            foreach (McpClientTool tool in tools)
             {
-                Description = Truncate(tool.Description ?? tool.Name, 1024),
-                Parameters = BinaryData.FromObjectAsJson(tool.JsonSchema),
-            });
+                // Several servers can advertise the same verb, so names are namespaced.
+                string exposedName = Sanitise($"{server.Name}_{tool.Name}");
 
-            // Anything from a remote server is treated as reaching organisation data, so it is
-            // what gets switched off when an external participant joins.
-            _specs.Add(new ToolSpec(
-                exposedName,
-                Truncate(tool.Description ?? tool.Name, 1024),
-                tool.JsonSchema.GetRawText(),
-                AccessesOrganisationData: true));
+                if (_bindings.ContainsKey(exposedName))
+                {
+                    _logger.LogWarning("Duplicate tool name {Name}; skipping.", exposedName);
+                    continue;
+                }
 
-            McpClientTool captured = tool;
-            _bindings[exposedName] = new ToolBinding(
-                exposedName,
-                (args, ct) => CallMcpToolAsync(client, captured, args, ct));
+                _definitions.Add(new VoiceLiveFunctionDefinition(exposedName)
+                {
+                    Description = Truncate(tool.Description ?? tool.Name, 1024),
+                    Parameters = BinaryData.FromObjectAsJson(tool.JsonSchema),
+                });
+
+                // Anything from a remote server is treated as reaching organisation data, so it is
+                // what gets switched off when an external participant joins.
+                _specs.Add(new ToolSpec(
+                    exposedName,
+                    Truncate(tool.Description ?? tool.Name, 1024),
+                    tool.JsonSchema.GetRawText(),
+                    AccessesOrganisationData: true));
+
+                McpClientTool captured = tool;
+                _bindings[exposedName] = new ToolBinding(
+                    exposedName,
+                    (args, ct) => CallMcpToolAsync(client, captured, args, ct));
+            }
         }
 
         _logger.LogInformation(
             "MCP server {Server} contributed {Count} tools.",
             server.Name,
             tools.Count);
+        return true;
     }
 
     public async Task<string> InvokeAsync(string name, string argumentsJson, CancellationToken cancellationToken)
     {
-        if (!_bindings.TryGetValue(name, out ToolBinding? binding))
+        ToolBinding? binding;
+        lock (_gate)
+        {
+            _bindings.TryGetValue(name, out binding);
+        }
+
+        if (binding is null)
         {
             return JsonSerializer.Serialize(new { error = $"Unknown tool '{name}'." });
         }

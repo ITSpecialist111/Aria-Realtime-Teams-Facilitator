@@ -32,8 +32,23 @@ body.light{--bg:#f8fafc;--card:#ffffff;--sub:#f1f5f9;--ink:#0f172a;--body:#33415
 .sk.dyn{background:rgba(167,139,250,.14);border-color:rgba(167,139,250,.65);color:var(--ink)}
 .pulse{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .mbar{width:42px;height:6px;background:rgba(148,163,184,.22);border-radius:4px;overflow:hidden;display:inline-block}.mbar i{display:block;height:100%}
+.viz{display:grid;grid-template-columns:.8fr 1.2fr;gap:14px;margin:0 0 14px}
+.vcard{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 18px}
+.vh{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.segs{display:flex;gap:5px;height:12px;margin:6px 0 8px}
+.seg{background:rgba(148,163,184,.18);border-radius:6px;overflow:hidden;position:relative}.seg i{display:block;height:100%;border-radius:6px}
+.tline{display:flex;align-items:flex-start;justify-content:space-between;position:relative;padding:6px 4px 0}
+.tline:before{content:"";position:absolute;left:24px;right:24px;top:30px;height:2px;background:var(--line)}
+.tline.empty-tl:before{display:none}
+.tnode{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;flex:1;min-width:0;padding:0 4px;text-align:center}
+.ttime{font-size:10.5px;font-weight:600;line-height:1.25;color:var(--dim);font-variant-numeric:tabular-nums;margin-bottom:5px}
+.tdot{width:11px;height:11px;border-radius:50%;border:2px solid var(--ok);background:var(--card);margin-bottom:5px}
+.tnode.cur .tdot{background:var(--skill);border-color:var(--skill);box-shadow:0 0 0 4px rgba(167,139,250,.22)}
+.tnode.cur .ttime{color:var(--skill)}
+.tlbl{font-size:12.5px;color:var(--body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.tnode.cur .tlbl{color:var(--ink);font-weight:600}
 .grid{display:grid;grid-template-columns:1.35fr .9fr .85fr;gap:14px}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;display:flex;flex-direction:column;min-height:540px;max-height:calc(100vh - 156px)}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;display:flex;flex-direction:column;min-height:460px;max-height:calc(100vh - 252px)}
 .ph{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;border-bottom:1px solid var(--line);gap:8px}
 .tabs{display:flex;gap:5px;flex-wrap:wrap}
 .tab{border:1px solid transparent;background:transparent;border-radius:8px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12.5px;font-weight:500;color:var(--mute)}
@@ -53,7 +68,7 @@ body.light{--bg:#f8fafc;--card:#ffffff;--sub:#f1f5f9;--ink:#0f172a;--body:#33415
 .turn{margin:0 0 11px;font-size:13.5px}.turn b{font-size:12px;color:var(--dec)}.turn.agent b{color:var(--skill)}.turn time{color:var(--dim);font-size:11px;margin-left:6px}.turn div{color:var(--body);margin-top:1px}
 .empty{color:var(--mute);padding:24px 6px;text-align:center;font-size:13.5px}
 .dots:after{content:"";animation:d 1.2s steps(4) infinite}@keyframes d{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
-@media(max-width:1100px){.grid{grid-template-columns:1fr}.panel{max-height:none;min-height:320px}}
+@media(max-width:1100px){.viz,.grid{grid-template-columns:1fr}.panel{max-height:none;min-height:320px}}
 </style>
 </head>
 <body>
@@ -74,6 +89,18 @@ body.light{--bg:#f8fafc;--card:#ffffff;--sub:#f1f5f9;--ink:#0f172a;--body:#33415
     <div class="pulse">
       <span class="pill"><span id="m-align">Alignment —</span><span class="mbar"><i id="m-align-bar"></i></span></span>
       <span class="pill" id="m-voices">Voices —</span>
+    </div>
+  </section>
+
+  <section class="viz">
+    <div class="vcard">
+      <div class="vh"><span class="micro">Agenda pacing</span><span class="rem" id="m-pace-stat">On track</span></div>
+      <div class="segs" id="m-pace-segs"></div>
+      <div class="rem" id="m-pace-sub" style="text-align:left"></div>
+    </div>
+    <div class="vcard">
+      <div class="vh"><span class="micro">Topic timeline</span><span class="rem" id="m-ms-count"></span></div>
+      <div class="tline" id="m-timeline"></div>
     </div>
   </section>
 
@@ -220,8 +247,66 @@ function render(d) {
   if (!d.transcript.length) cv.append(el('div', 'empty', 'Conversation appears here as people speak.'));
   if (atEnd) cv.scrollTop = cv.scrollHeight;
 
+  renderPacingAndTimeline(d);
   renderFeed(d);
   renderOutcomes(d);
+}
+
+function renderPacingAndTimeline(d) {
+  const segBox = $('#m-pace-segs'), stat = $('#m-pace-stat'), sub = $('#m-pace-sub');
+  const items = d.agenda.items || [], done = d.agenda.done || [], curIdx = d.agenda.current;
+  segBox.replaceChildren();
+  if (!items.length) {
+    stat.textContent = 'Freeform'; stat.style.color = 'var(--mute)';
+    sub.textContent = 'No timed agenda set for this call';
+  } else {
+    let over = false, tight = false;
+    items.forEach((it, idx) => {
+      const timed = it.minutes > 0;
+      const weight = timed ? it.minutes : 5;
+      const s = el('div', 'seg'); s.style.flex = String(weight); s.title = it.title;
+      const fill = el('i');
+      if (done.includes(idx)) {
+        fill.style.width = '100%';
+        fill.style.background = timed && it.spent > it.minutes * 1.1 ? 'var(--warn)' : 'var(--ok)';
+      } else if (idx === curIdx) {
+        const ratio = timed ? (it.spent || 0) / it.minutes : 0.5;
+        if (timed && ratio > 1) over = true; else if (timed && ratio >= 0.8) tight = true;
+        fill.style.width = Math.round(Math.min(1, Math.max(0.12, ratio)) * 100) + '%';
+        fill.style.background = !timed ? 'var(--dec)' : ratio > 1 ? 'var(--bad)' : ratio >= 0.8 ? 'var(--warn)' : 'var(--dec)';
+      } else {
+        fill.style.width = '0%';
+      }
+      s.append(fill); segBox.append(s);
+    });
+    stat.textContent = over ? 'Over box' : tight ? 'Tight on box' : 'On track';
+    stat.style.color = over ? 'var(--bad)' : tight ? 'var(--warn)' : 'var(--ok)';
+    const cur = items[curIdx], nxt = items[curIdx + 1];
+    sub.textContent = cur
+      ? 'Now: ' + cur.title + (nxt ? '  \u00B7  Next: ' + nxt.title : '')
+      : 'All agenda items completed';
+  }
+
+  const tl = $('#m-timeline'), ms = (d.milestones && d.milestones.length)
+    ? d.milestones.slice(-6)
+    : (items[curIdx] ? [{ label: items[curIdx].title, at: 0, kind: 'agenda' }] : []);
+  const totalMs = (d.milestones && d.milestones.length) ? d.milestones.length : ms.length;
+  $('#m-ms-count').textContent = totalMs ? totalMs + ' milestone' + (totalMs === 1 ? '' : 's') : 'Listening for first topic';
+  tl.classList.toggle('empty-tl', !ms.length);
+  tl.replaceChildren();
+  if (!ms.length) {
+    tl.append(el('div', 'rem', '00:00  Session started \u2014 topic milestones appear automatically as discussion shifts'));
+    return;
+  }
+  ms.forEach((m, i) => {
+    const latest = i === ms.length - 1;
+    const n = el('div', 'tnode' + (latest ? ' cur' : ''));
+    const dot = el('span', 'tdot');
+    if (!latest && m.kind === 'agenda') dot.style.borderColor = 'var(--dec)';
+    const lbl = el('div', 'tlbl', m.label); lbl.title = m.label;
+    n.append(el('div', 'ttime', clock(m.at)), dot, lbl);
+    tl.append(n);
+  });
 }
 
 async function tick() {

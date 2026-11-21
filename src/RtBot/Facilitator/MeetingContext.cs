@@ -40,12 +40,19 @@ public sealed record ActiveSkillBadge(
     DateTimeOffset ActivatedAt,
     bool Dynamic);
 
-/// <summary>Where the agenda stands right now.</summary>
+/// <summary>A timestamped discussion topic milestone along the meeting timeline.</summary>
+public sealed record TopicMilestone(
+    string Label,
+    TimeSpan AtElapsed,
+    string Kind = "topic");
+
+/// <summary>Where the agenda stands right now, including actual minutes spent per item.</summary>
 public sealed record AgendaStatus(
     IReadOnlyList<AgendaItem> Items,
     int CurrentIndex,
     TimeSpan CurrentElapsed,
-    IReadOnlyList<int> Completed)
+    IReadOnlyList<int> Completed,
+    IReadOnlyDictionary<int, double>? ActualMinutes = null)
 {
     public AgendaItem? Current => CurrentIndex >= 0 && CurrentIndex < Items.Count ? Items[CurrentIndex] : null;
 
@@ -76,6 +83,8 @@ public sealed class MeetingContext
     private readonly List<string> _openQuestions = [];
     private readonly List<AgendaItem> _agenda = [];
     private readonly List<int> _agendaDone = [];
+    private readonly Dictionary<int, double> _agendaActualMinutes = [];
+    private readonly List<TopicMilestone> _milestones = [];
     private readonly List<string> _parkingLot = [];
     private readonly List<MeetingTimer> _timers = [];
     private readonly List<MeetingSkill> _skills = [];
@@ -524,6 +533,28 @@ public sealed class MeetingContext
         }
     }
 
+    public IReadOnlyList<TopicMilestone> Milestones
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _milestones];
+            }
+        }
+    }
+
+    /// <summary>Adds a topic milestone if it differs from recent ones.</summary>
+    public bool AddMilestone(string label, string kind = "topic", TimeSpan? atElapsed = null)
+    {
+        lock (_gate)
+        {
+            int before = _milestones.Count;
+            AddMilestoneLocked(label, kind, atElapsed);
+            return _milestones.Count > before;
+        }
+    }
+
     /// <summary>Replaces the agenda and starts its first item.</summary>
     public void SetAgenda(IEnumerable<AgendaItem> items)
     {
@@ -535,9 +566,14 @@ public sealed class MeetingContext
                 .Where(i => i.Title.Length > 0)
                 .Take(30));
             _agendaDone.Clear();
+            _agendaActualMinutes.Clear();
             _agendaIndex = _agenda.Count > 0 ? 0 : -1;
             _agendaItemStartedAt = DateTimeOffset.UtcNow;
             _overrunAnnouncedFor = -1;
+            if (_agenda.Count > 0)
+            {
+                AddMilestoneLocked(_agenda[0].Title, "agenda", _milestones.Count == 0 ? TimeSpan.Zero : null);
+            }
         }
     }
 
@@ -546,10 +582,13 @@ public sealed class MeetingContext
     {
         lock (_gate)
         {
-            if (_agendaIndex < 0)
+            if (_agendaIndex < 0 || _agendaIndex >= _agenda.Count)
             {
                 return null;
             }
+
+            _agendaActualMinutes[_agendaIndex] = _agendaActualMinutes.GetValueOrDefault(_agendaIndex) +
+                Math.Max(0, (DateTimeOffset.UtcNow - _agendaItemStartedAt).TotalMinutes);
 
             if (!_agendaDone.Contains(_agendaIndex))
             {
@@ -558,14 +597,62 @@ public sealed class MeetingContext
 
             _agendaIndex++;
             _agendaItemStartedAt = DateTimeOffset.UtcNow;
+            _overrunAnnouncedFor = -1;
             if (_agendaIndex >= _agenda.Count)
             {
                 _agendaIndex = _agenda.Count;
                 return null;
             }
 
+            AddMilestoneLocked(_agenda[_agendaIndex].Title, "agenda");
             return _agenda[_agendaIndex];
         }
+    }
+
+    /// <summary>Advances forward to <paramref name="targetIndex"/> when the scribe sees the room move on.</summary>
+    public bool AdvanceAgendaTo(int targetIndex)
+    {
+        lock (_gate)
+        {
+            if (_agendaIndex < 0 || targetIndex <= _agendaIndex || targetIndex >= _agenda.Count)
+            {
+                return false;
+            }
+
+            _agendaActualMinutes[_agendaIndex] = _agendaActualMinutes.GetValueOrDefault(_agendaIndex) +
+                Math.Max(0, (DateTimeOffset.UtcNow - _agendaItemStartedAt).TotalMinutes);
+
+            for (int i = _agendaIndex; i < targetIndex; i++)
+            {
+                if (!_agendaDone.Contains(i))
+                {
+                    _agendaDone.Add(i);
+                }
+            }
+
+            _agendaIndex = targetIndex;
+            _agendaItemStartedAt = DateTimeOffset.UtcNow;
+            _overrunAnnouncedFor = -1;
+            AddMilestoneLocked(_agenda[_agendaIndex].Title, "agenda");
+            return true;
+        }
+    }
+
+    private void AddMilestoneLocked(string label, string kind, TimeSpan? atElapsed = null)
+    {
+        label = OneLine(label, 34);
+        if (label.Length < 2 || _milestones.TakeLast(3).Any(m => m.Label.Equals(label, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        if (_milestones.Count >= 24)
+        {
+            _milestones.RemoveAt(1);
+        }
+
+        TimeSpan when = atElapsed ?? Elapsed;
+        _milestones.Add(new TopicMilestone(label, when < TimeSpan.Zero ? TimeSpan.Zero : when, OneLine(kind, 16).ToLowerInvariant()));
     }
 
     /// <summary>Adds time to the current item's timebox.</summary>
@@ -590,7 +677,16 @@ public sealed class MeetingContext
     {
         lock (_gate)
         {
-            return new AgendaStatus([.. _agenda], _agendaIndex, DateTimeOffset.UtcNow - _agendaItemStartedAt, [.. _agendaDone]);
+            TimeSpan currentElapsed = _agendaIndex >= 0 && _agendaIndex < _agenda.Count
+                ? DateTimeOffset.UtcNow - _agendaItemStartedAt
+                : TimeSpan.Zero;
+            Dictionary<int, double> actual = new(_agendaActualMinutes);
+            if (_agendaIndex >= 0 && _agendaIndex < _agenda.Count)
+            {
+                actual[_agendaIndex] = actual.GetValueOrDefault(_agendaIndex) + Math.Max(0, currentElapsed.TotalMinutes);
+            }
+
+            return new AgendaStatus([.. _agenda], _agendaIndex, currentElapsed, [.. _agendaDone], actual);
         }
     }
 

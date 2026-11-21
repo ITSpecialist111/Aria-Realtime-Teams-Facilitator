@@ -71,10 +71,22 @@ public sealed class LiveController : ControllerBase
             uncovered = m.UncoveredChecklist,
             agenda = new
             {
-                items = agenda.Items.Select(a => new { title = a.Title, minutes = a.Minutes }),
+                items = agenda.Items.Select((a, idx) => new
+                {
+                    title = a.Title,
+                    minutes = a.Minutes,
+                    spent = agenda.ActualMinutes is not null && agenda.ActualMinutes.TryGetValue(idx, out double sm) ? Math.Round(sm, 2) : 0,
+                }),
                 current = agenda.CurrentIndex,
+                currentElapsed = (int)agenda.CurrentElapsed.TotalSeconds,
                 done = agenda.Completed,
             },
+            milestones = m.Milestones.TakeLast(10).Select(ms => new
+            {
+                label = ms.Label,
+                at = (int)ms.AtElapsed.TotalSeconds,
+                kind = ms.Kind,
+            }),
             summary = notes.Summary,
             decisions = notes.Decisions,
             actions = notes.Actions.Select(a => new { owner = a.Owner, task = a.Task, due = a.Due }),

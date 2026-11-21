@@ -31,6 +31,8 @@ public sealed class MeetingScribe
           "tracked": {"<category>": ["item"]},
           "covered": ["checklist items that were dealt with in these lines"],
           "alignment": {"score": 0-100, "note": "at most 8 words on why"},
+          "topic_milestone": "2-4 word label for the distinct topic now being discussed if it shifted from RECENT TOPIC MILESTONES, else null",
+          "agenda_index": 0-based integer index into AGENDA if the room moved forward onto a later item, else null,
           "insights": [{"kind": "skill|risk|alignment|facilitation|pace", "severity": "high|medium|info", "title": "3-6 words", "text": "one or two sentences", "skill": "skill-name if kind is skill, else null"}],
           "lookups": ["up to two concise search queries for the organisation's Microsoft 365 data (mail, files, playbooks, policies, meetings)"],
           "skill_shifts": ["up to two AVAILABLE SKILL names whose domain or triggers appear in NEW TRANSCRIPT LINES"]
@@ -46,6 +48,12 @@ public sealed class MeetingScribe
         - "alignment" is your read of how aligned the room is right now: 90+ shared understanding and converging,
           60-89 broadly aligned with open points, 30-59 people disagreeing or talking past each other,
           below 30 conflict or confusion. Give a score on every pass and keep it stable unless something changed.
+        - "topic_milestone": when the substantive subject in NEW TRANSCRIPT LINES begins or shifts to a distinct new
+          topic (not already the latest entry in RECENT TOPIC MILESTONES), give a crisp 2-4 word noun-phrase label
+          (for example "EHR outage triage", "Ambulance diversion", "ICO & press risk", "Ransom vs rebuild").
+          Always emit one on the first substantive pass; emit null if the room is still on the same topic.
+        - "agenda_index": if AGENDA is present and the conversation has clearly moved forward onto a later item than
+          the one marked [NOW], return that item's 0-based index; otherwise null. Never move backwards.
         - "insights" are things worth a facilitator's attention in THESE lines: a risk or dependency
           nobody owns, people disagreeing or talking past each other (alignment), a decision being avoided,
           a topic going round in circles, someone not heard from, too much detail for this forum (pace).
@@ -98,9 +106,17 @@ public sealed class MeetingScribe
         string guidance = string.Join("\n\n", skills.Select(s =>
             $"## {s.Name}: {s.Description}\n{(s.Guidance.Length > 1400 ? s.Guidance[..1400] : s.Guidance)}"));
         string raised = string.Join("; ", meeting.Insights.TakeLast(10).Select(i => i.Title));
+        AgendaStatus agenda = meeting.SnapshotAgenda();
+        string agendaLine = agenda.Items.Count == 0
+            ? "(none)"
+            : string.Join("; ", agenda.Items.Select((a, idx) => $"[{idx}]{(idx == agenda.CurrentIndex ? "[NOW]" : agenda.Completed.Contains(idx) ? "[done]" : string.Empty)} {a.Title}"));
+        string recentMilestones = string.Join(" -> ", meeting.Milestones.TakeLast(6).Select(m => m.Label));
         string user = $"""
             CURRENT NOTES:
             {RenderNotesForModel(current)}
+
+            AGENDA: {agendaLine}
+            RECENT TOPIC MILESTONES: {(recentMilestones.Length > 0 ? recentMilestones : "(none yet)")}
 
             ACTIVE SKILLS:
             {(guidance.Length > 0 ? guidance : "(none)")}
@@ -151,6 +167,38 @@ public sealed class MeetingScribe
         if (result["alignment"] is JsonObject align && align["score"] is JsonValue sc && sc.TryGetValue(out double score))
         {
             meeting.SetAlignment((int)Math.Round(score), align["note"] is JsonValue nv && nv.TryGetValue(out string? note) ? note : null);
+        }
+
+        bool advancedAgenda = false;
+        if (result["agenda_index"] is JsonValue agVal)
+        {
+            int parsedIdx = -1;
+            if (agVal.TryGetValue(out int ai))
+            {
+                parsedIdx = ai;
+            }
+            else if (agVal.TryGetValue(out double ad))
+            {
+                parsedIdx = (int)Math.Round(ad);
+            }
+            else if (agVal.TryGetValue(out string? asStr) && int.TryParse(asStr, out int ap))
+            {
+                parsedIdx = ap;
+            }
+
+            if (parsedIdx >= 0)
+            {
+                advancedAgenda = meeting.AdvanceAgendaTo(parsedIdx);
+            }
+        }
+
+        if (!advancedAgenda &&
+            result["topic_milestone"] is JsonValue tmVal &&
+            tmVal.TryGetValue(out string? milestone) &&
+            !string.IsNullOrWhiteSpace(milestone) &&
+            !milestone.Trim().Equals("null", StringComparison.OrdinalIgnoreCase))
+        {
+            meeting.AddMilestone(milestone, "topic");
         }
 
         List<string> lookups = [.. ReadStrings(result["lookups"]).Where(q => q.Length > 6).Take(2)];

@@ -54,7 +54,8 @@ public sealed record TileState(
     IReadOnlyList<int>? AlignmentTrend = null,
     IReadOnlyList<(string Name, double Share)>? Voices = null,
     string? Searching = null,
-    IReadOnlyList<ActiveSkillBadge>? Skills = null);
+    IReadOnlyList<ActiveSkillBadge>? Skills = null,
+    IReadOnlyList<TopicMilestone>? Milestones = null);
 
 /// <summary>
 /// Draws Aria's video tile: a calm, modern slate HUD with a slim meeting bar, active skill pills,
@@ -145,6 +146,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
         if (s.View == TileView.Overview)
         {
+            DrawPacingAndTimeline(s);
             DrawIntelligenceFeed(s);
             DrawOutcomesColumn(s);
         }
@@ -402,11 +404,264 @@ public sealed class FacilitatorTileRenderer : IDisposable
         }
     }
 
+    // ---- Zone 2.5: Agenda Pacing chart + Topic Milestone Timeline (y = 140..226) --------
+
+    private void DrawPacingAndTimeline(TileState s)
+    {
+        DrawAgendaPacingCard(s, 24, 140, 446, 86);
+        DrawTopicTimelineCard(s, 482, 140, 774, 86);
+    }
+
+    private void DrawAgendaPacingCard(TileState s, float x, float y, float w, float h)
+    {
+        CardBox(Surface, Hairline, x, y, w, h, 16);
+        Text("AGENDA PACING", _micro, Dim, new RectangleF(x + 18, y + 11, 150, 16), null);
+
+        IReadOnlyList<AgendaItem> items = s.Agenda.Items;
+        if (items.Count == 0)
+        {
+            if (s.ScheduledLength is { TotalSeconds: > 0 } len)
+            {
+                double frac = s.Elapsed.TotalSeconds / len.TotalSeconds;
+                bool over = frac > 1.0;
+                Color tone = over ? Over : frac >= 0.85 ? Warn : Ok;
+                string badge = over ? $"+{Minutes(s.Elapsed - len)} over" : "On schedule";
+                Text(badge, _micro, tone, new RectangleF(x + w - 150, y + 11, 132, 16), RightAligned);
+                Bar(x + 18, y + 40, w - 36, 10, Math.Clamp(frac, 0, 1), tone);
+                Text($"{(int)s.Elapsed.TotalMinutes}m of {(int)Math.Round(len.TotalMinutes)}m planned", _small, Muted, new RectangleF(x + 18, y + 57, w - 36, 18), null);
+            }
+            else
+            {
+                Text("Freeform", _micro, Muted, new RectangleF(x + w - 120, y + 11, 102, 16), RightAligned);
+                Text("No timed agenda set for this call", _small, Muted, new RectangleF(x + 18, y + 42, w - 36, 20), null);
+            }
+
+            return;
+        }
+
+        // Compute pacing status across timed completed + active items only.
+        IReadOnlyDictionary<int, double>? actuals = s.Agenda.ActualMinutes;
+        double plannedSoFar = 0;
+        double actualSoFar = 0;
+        bool currentOver = false;
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i].Minutes is not > 0)
+            {
+                continue;
+            }
+
+            double planned = items[i].Minutes!.Value;
+            bool done = s.Agenda.Completed.Contains(i);
+            bool isCurrent = i == s.Agenda.CurrentIndex;
+            if (done || isCurrent)
+            {
+                double spent = actuals is not null
+                    ? actuals.GetValueOrDefault(i, 0)
+                    : isCurrent ? Math.Max(0, s.Agenda.CurrentElapsed.TotalMinutes) : planned;
+                actualSoFar += spent;
+                plannedSoFar += isCurrent ? Math.Min(planned, Math.Max(spent, 0.5)) : planned;
+                if (isCurrent && spent > planned)
+                {
+                    currentOver = true;
+                }
+            }
+        }
+
+        double drift = actualSoFar - plannedSoFar;
+        (string statusText, Color statusTone) = currentOver || drift > 1.0
+            ? ($"+{Math.Max(1, (int)Math.Round(Math.Max(drift, -(s.Agenda.CurrentRemaining?.TotalMinutes ?? 0))))}m over box", Over)
+            : s.Agenda.Current?.Minutes is { } cm && cm > 0 && s.Agenda.CurrentElapsed.TotalMinutes / cm >= 0.8
+                ? ("Tight on box", Warn)
+                : ("On track", Ok);
+
+        Text(statusText, _micro, statusTone, new RectangleF(x + w - 165, y + 11, 147, 16), RightAligned);
+
+        // Segmented proportional bar: up to 8 visible segments, normalized to never exceed barW.
+        const float bx = 18;
+        float barX = x + bx;
+        float barY = y + 35;
+        float barW = w - (bx * 2);
+        const float gap = 5f;
+        int windowCount = Math.Min(items.Count, 8);
+        int startIdx = items.Count <= 8
+            ? 0
+            : Math.Clamp(s.Agenda.CurrentIndex - 4, 0, items.Count - windowCount);
+
+        double totalWeight = 0;
+        for (int k = 0; k < windowCount; k++)
+        {
+            totalWeight += items[startIdx + k].Minutes is > 0 ? items[startIdx + k].Minutes!.Value : 5.0;
+        }
+
+        float usableW = Math.Max(40, barW - (gap * (windowCount - 1)));
+        float[] segWidths = new float[windowCount];
+        float rawSum = 0;
+        for (int k = 0; k < windowCount; k++)
+        {
+            double weight = items[startIdx + k].Minutes is > 0 ? items[startIdx + k].Minutes!.Value : 5.0;
+            segWidths[k] = (float)Math.Max(16, usableW * (weight / Math.Max(1.0, totalWeight)));
+            rawSum += segWidths[k];
+        }
+
+        float norm = rawSum > 0 ? usableW / rawSum : 1f;
+        float cx = barX;
+        for (int k = 0; k < windowCount; k++)
+        {
+            int i = startIdx + k;
+            float segW = k == windowCount - 1 ? Math.Max(8, barX + barW - cx) : Math.Max(8, segWidths[k] * norm);
+            double? plannedMins = items[i].Minutes is > 0 ? items[i].Minutes : null;
+            bool done = s.Agenda.Completed.Contains(i);
+            bool isCurrent = i == s.Agenda.CurrentIndex;
+            double spent = actuals is not null
+                ? actuals.GetValueOrDefault(i, 0)
+                : isCurrent ? Math.Max(0, s.Agenda.CurrentElapsed.TotalMinutes) : 0;
+
+            FillRounded(Color.FromArgb(32, 255, 255, 255), cx, barY, segW, 12, 6);
+
+            if (done)
+            {
+                Color doneTone = plannedMins is { } pm && spent > pm * 1.1 ? Warn : Ok;
+                FillRounded(Color.FromArgb(205, doneTone), cx, barY, segW, 12, 6);
+            }
+            else if (isCurrent)
+            {
+                double ratio = plannedMins is { } pm ? spent / pm : 0.5;
+                Color curTone = plannedMins is null ? DecisionTone : ratio > 1.0 ? Over : ratio >= 0.8 ? Warn : DecisionTone;
+                float fillW = (float)Math.Max(8, segW * Math.Clamp(ratio, 0.12, 1.0));
+                FillRounded(curTone, cx, barY, fillW, 12, 6);
+                if (plannedMins is not null && ratio > 1.0)
+                {
+                    using Pen overPen = new(Over, 1.5f);
+                    using GraphicsPath gp = RoundedPath(cx - 1, barY - 1, segW + 2, 14, 7);
+                    _g.DrawPath(overPen, gp);
+                }
+            }
+
+            cx += segW + gap;
+        }
+
+        // Bottom caption: current item timing + next item preview.
+        if (s.Agenda.Current is { } cur)
+        {
+            bool hasNext = s.Agenda.Next is not null;
+            float titleMax = hasNext ? 132 : 220;
+            string leftPart = cur.Minutes is { } m && m > 0 && s.Agenda.CurrentRemaining is { } rem
+                ? rem >= TimeSpan.Zero
+                    ? $"Now: {Ellipsize(cur.Title, _small, titleMax)} ({Clock(rem)} left)"
+                    : $"Now: {Ellipsize(cur.Title, _small, titleMax)} (+{Clock(-rem)} over)"
+                : $"Now: {Ellipsize(cur.Title, _small, titleMax + 45)}";
+            Text(leftPart, _small, BodyInk, new RectangleF(x + 18, y + 56, hasNext ? w - 168 : w - 36, 20), null);
+
+            if (s.Agenda.Next is { } nxt)
+            {
+                string nextPart = $"Next: {Ellipsize(nxt.Title, _micro, 96)}";
+                Text(nextPart, _micro, Dim, new RectangleF(x + w - 150, y + 58, 132, 18), RightAligned);
+            }
+        }
+        else
+        {
+            Text("All agenda items completed", _small, Ok, new RectangleF(x + 18, y + 56, w - 36, 20), null);
+        }
+    }
+
+    private void DrawTopicTimelineCard(TileState s, float x, float y, float w, float h)
+    {
+        CardBox(Surface, Hairline, x, y, w, h, 16);
+        Text("TOPIC TIMELINE", _micro, Dim, new RectangleF(x + 18, y + 11, 160, 16), null);
+
+        List<TopicMilestone> nodes = s.Milestones is { Count: > 0 } ms
+            ? [.. ms.TakeLast(5)]
+            : s.Agenda.Current is { } cur
+                ? [new TopicMilestone(cur.Title, TimeSpan.Zero, "agenda")]
+                : [];
+
+        int totalMilestones = s.Milestones is { Count: > 0 } mList ? mList.Count : nodes.Count;
+        string msHeader = totalMilestones > 0
+            ? $"{totalMilestones} milestone{(totalMilestones == 1 ? string.Empty : "s")}"
+            : "Listening for first topic";
+        Text(msHeader, _micro, Muted, new RectangleF(x + w - 180, y + 11, 162, 16), RightAligned);
+
+        float lineLeft = x + 64;
+        float lineRight = x + w - 64;
+        float lineY = y + 48;
+
+        using (Pen baseTrack = new(Color.FromArgb(38, 255, 255, 255), 2f))
+        {
+            _g.DrawLine(baseTrack, lineLeft, lineY, lineRight, lineY);
+        }
+
+        if (nodes.Count == 0)
+        {
+            using SolidBrush waitDot = new(DecisionTone);
+            _g.FillEllipse(waitDot, lineLeft - 5, lineY - 5, 10, 10);
+            Text("00:00  Session started \u2014 topic milestones appear automatically as discussion shifts", _small, Muted, new RectangleF(lineLeft + 14, lineY - 10, w - 100, 20), null);
+            return;
+        }
+
+        int count = nodes.Count;
+        float span = lineRight - lineLeft;
+        float step = count == 1 ? 0 : span / (count - 1);
+
+        // Active progress line from first node to latest node.
+        float activeEnd = count == 1 ? lineLeft + (span * 0.28f) : lineLeft + (step * (count - 1));
+        using (LinearGradientBrush progBrush = new(new PointF(lineLeft - 1, lineY), new PointF(activeEnd + 2, lineY), DecisionTone, SkillTone))
+        using (Pen progPen = new(progBrush, 2.5f))
+        {
+            _g.DrawLine(progPen, lineLeft, lineY, activeEnd, lineY);
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            TopicMilestone m = nodes[i];
+            bool latest = i == count - 1;
+            float nx = count == 1 ? lineLeft : lineLeft + (step * i);
+            Color nodeTone = latest ? SkillTone : m.Kind == "agenda" ? DecisionTone : Ok;
+
+            Text(Clock(m.AtElapsed), _micro, latest ? nodeTone : Dim, new RectangleF(nx - 42, y + 26, 84, 15), Centred);
+
+            if (latest)
+            {
+                double pulse = 0.5 + (0.5 * Math.Sin(_t * 3.0));
+                float halo = 9f + (float)(pulse * 3.5);
+                using SolidBrush glow = new(Color.FromArgb(46, nodeTone));
+                _g.FillEllipse(glow, nx - halo, lineY - halo, halo * 2, halo * 2);
+            }
+
+            using (SolidBrush fill = new(latest ? nodeTone : Surface))
+            {
+                _g.FillEllipse(fill, nx - 5.5f, lineY - 5.5f, 11f, 11f);
+            }
+
+            using (Pen rim = new(nodeTone, 2f))
+            {
+                _g.DrawEllipse(rim, nx - 5.5f, lineY - 5.5f, 11f, 11f);
+            }
+
+            if (count == 1)
+            {
+                RectangleF singleBox = new(x + 18, y + 57, w - 36, 20);
+                Text(Ellipsize(m.Label, _small, 320), _small, Ink, singleBox, null);
+            }
+            else
+            {
+                float halfSlot = (step / 2f) - 6f;
+                RectangleF labelBox = i == 0
+                    ? new RectangleF(x + 18, y + 57, (nx - (x + 18)) + halfSlot, 20)
+                    : i == count - 1
+                        ? new RectangleF(nx - halfSlot, y + 57, ((x + w - 18) - nx) + halfSlot, 20)
+                        : new RectangleF(nx - halfSlot, y + 57, halfSlot * 2f, 20);
+                Text(Ellipsize(m.Label, _small, labelBox.Width - 4), _small, latest ? Ink : BodyInk, labelBox, Centred);
+            }
+        }
+    }
+
     // ---- Zone 3A: Live Intelligence feed (left primary panel, x = 24..800) --------------
 
     private void DrawIntelligenceFeed(TileState s)
     {
-        const float x = 24, y = 144, w = 776, h = 554;
+        const float x = 24, y = 236, w = 776, h = 462;
         CardBox(Surface, Hairline, x, y, w, h, 18);
 
         IReadOnlyList<MeetingInsight> insights = s.Insights ?? [];
@@ -487,7 +742,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
         if (!any)
         {
-            float ey = y + 180;
+            float ey = y + 145;
             Text("Listening to the conversation", _h2, Ink, new RectangleF(x + 40, ey, w - 80, 28), Centred);
             Text("Specialist skills activate automatically as topics shift, and relevant Microsoft 365 playbooks or policies appear here via Work IQ.", _body, Muted, new RectangleF(x + 80, ey + 34, w - 160, 56), Centred);
         }
@@ -506,38 +761,38 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
     private void DrawOutcomesColumn(TileState s)
     {
-        const float x = 816, y = 144, w = 440, h = 554;
+        const float x = 816, y = 236, w = 440, h = 462;
         CardBox(Surface, Hairline, x, y, w, h, 18);
 
-        Text("OUTCOMES", _micro, Dim, new RectangleF(x + 22, y + 16, 160, 18), null);
+        Text("OUTCOMES", _micro, Dim, new RectangleF(x + 22, y + 14, 160, 18), null);
         int totalOutcomes = s.Decisions.Count + s.Actions.Count;
-        Text($"{totalOutcomes} captured", _small, Muted, new RectangleF(x + w - 160, y + 14, 138, 20), RightAligned);
+        Text($"{totalOutcomes} captured", _small, Muted, new RectangleF(x + w - 160, y + 12, 138, 20), RightAligned);
 
         using (Pen sep = new(Hairline, 1f))
         {
-            _g.DrawLine(sep, x + 20, y + 44, x + w - 20, y + 44);
+            _g.DrawLine(sep, x + 20, y + 40, x + w - 20, y + 40);
         }
 
-        // Section 1: Decisions (y = 56..196)
+        // Section 1: Decisions
         DrawOutcomeSection(
-            x + 20, y + 54, w - 40, 138,
+            x + 20, y + 48, w - 40, 126,
             "DECISIONS", s.Decisions.Count, DecisionTone,
             [.. s.Decisions.TakeLast(2).Reverse().Select(d => (d, (string?)null))]);
 
         using (Pen sep = new(Hairline, 1f))
         {
-            _g.DrawLine(sep, x + 20, y + 198, x + w - 20, y + 198);
+            _g.DrawLine(sep, x + 20, y + 180, x + w - 20, y + 180);
         }
 
-        // Section 2: Actions (y = 208..384)
+        // Section 2: Actions
         DrawOutcomeSection(
-            x + 20, y + 208, w - 40, 174,
+            x + 20, y + 188, w - 40, 134,
             "ACTIONS", s.Actions.Count, ActionTone,
             [.. s.Actions.TakeLast(2).Reverse().Select(a => (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 " + a.Due)}"))]);
 
         using (Pen sep = new(Hairline, 1f))
         {
-            _g.DrawLine(sep, x + 20, y + 388, x + w - 20, y + 388);
+            _g.DrawLine(sep, x + 20, y + 328, x + w - 20, y + 328);
         }
 
         // Section 3: Specialist Tracked (or Parking Lot)
@@ -548,12 +803,12 @@ public sealed class FacilitatorTileRenderer : IDisposable
                 .SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key)))
                 .TakeLast(2)
                 .Reverse()];
-            DrawOutcomeSection(x + 20, y + 398, w - 40, 146, "SPECIALIST TRACKING", trackedCount, TrackedTone, tracked);
+            DrawOutcomeSection(x + 20, y + 336, w - 40, 118, "SPECIALIST TRACKING", trackedCount, TrackedTone, tracked);
         }
         else
         {
             DrawOutcomeSection(
-                x + 20, y + 398, w - 40, 146,
+                x + 20, y + 336, w - 40, 118,
                 "PARKING LOT", s.Parked.Count, Warn,
                 [.. s.Parked.TakeLast(2).Reverse().Select(p => (p, (string?)null))]);
         }

@@ -183,7 +183,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             Meeting.AlignmentTrend,
             Meeting.Voices(),
             Meeting.IsRestricted ? null : Meeting.Searching,
-            Meeting.ActiveSkillBadges);
+            Meeting.ActiveSkillBadges,
+            Meeting.Milestones);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)

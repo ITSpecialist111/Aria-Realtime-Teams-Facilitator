@@ -295,9 +295,14 @@ public sealed class MeetingScribe
         if (uncovered.Count > 0)
         {
             md.AppendLine("**Not covered this time**");
-            foreach (string u in uncovered)
+            foreach (string u in uncovered.Take(6))
             {
                 md.Append("- ").AppendLine(u);
+            }
+
+            if (uncovered.Count > 6)
+            {
+                md.Append("- \u2026and ").Append(uncovered.Count - 6).AppendLine(" more (see the email)");
             }
 
             md.AppendLine();

@@ -258,6 +258,25 @@ public sealed class MeetingToolset
             });
 
         Add(
+            "show_on_screen",
+            "Change what your video tile shows. Use when someone asks to see or show the actions, decisions, tracked items, parking lot or agenda, or to go back to the overview. A list stays up for 90 seconds. After switching, summarise it aloud in one sentence.",
+            """{"type":"object","properties":{"view":{"type":"string","enum":["overview","actions","decisions","tracked","parked","agenda"]}},"required":["view"]}""",
+            (args, _) =>
+            {
+                RtBot.Media.TileView view = Str(args, "view").ToLowerInvariant() switch
+                {
+                    "actions" => RtBot.Media.TileView.Actions,
+                    "decisions" => RtBot.Media.TileView.Decisions,
+                    "tracked" => RtBot.Media.TileView.Tracked,
+                    "parked" => RtBot.Media.TileView.Parked,
+                    "agenda" => RtBot.Media.TileView.Agenda,
+                    _ => RtBot.Media.TileView.Overview,
+                };
+                _meeting.ShowView(view);
+                return Task.FromResult(Ok(view == RtBot.Media.TileView.Overview ? "Showing the overview." : $"Showing {view.ToString().ToLowerInvariant()} on screen."));
+            });
+
+        Add(
             "track_item",
             "Record something your active specialist skills say to listen for (for example an RFI, a variation, a risk or a safety issue) under one of their categories. Confirm briefly.",
             """

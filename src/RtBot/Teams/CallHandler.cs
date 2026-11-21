@@ -145,14 +145,16 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             length,
             Meeting.SnapshotAgenda(),
             Meeting.ActiveTimer,
-            notes.Decisions.Count,
-            notes.Actions.Count,
-            Meeting.ParkingLot.Count,
+            notes.Decisions,
+            notes.Actions,
+            Meeting.ParkingLot,
+            Meeting.Tracked,
             Meeting.Participants.Count,
             Meeting.IsRestricted,
             _caption,
             _captionAt,
-            Meeting.SpecialismLabel);
+            Meeting.SpecialismLabel,
+            Meeting.CurrentView);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -666,7 +668,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     /// <summary>Final notes pass and recap, run before the voice session is torn down.</summary>
     private async Task WrapUpAsync()
     {
-        if (Meeting.RecentTurns(1).Count == 0)
+        // Only the agent talked (e.g. it was alone and left): nothing worth recapping.
+        if (!Meeting.RecentTurns(600).Any(t => !t.IsAgent))
         {
             return;
         }

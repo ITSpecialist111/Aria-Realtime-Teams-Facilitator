@@ -14,6 +14,17 @@ public enum AgentPresence
     Speaking,
 }
 
+/// <summary>What the main panel shows: the overview, or one list in full on request.</summary>
+public enum TileView
+{
+    Overview,
+    Actions,
+    Decisions,
+    Tracked,
+    Parked,
+    Agenda,
+}
+
 /// <summary>Everything the tile shows, captured once per frame.</summary>
 public sealed record TileState(
     string AgentName,
@@ -24,22 +35,24 @@ public sealed record TileState(
     TimeSpan? ScheduledLength,
     AgendaStatus Agenda,
     MeetingTimer? Timer,
-    int Decisions,
-    int Actions,
-    int Parked,
+    IReadOnlyList<string> Decisions,
+    IReadOnlyList<ActionItem> Actions,
+    IReadOnlyList<string> Parked,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> Tracked,
     int People,
     bool Restricted,
     string? Caption,
     DateTimeOffset? CaptionAt,
-    string? Specialism = null);
+    string? Specialism = null,
+    TileView View = TileView.Overview);
 
 /// <summary>
-/// Draws Aria's video tile: a presence orb that reacts to listening, thinking and speaking, and a
-/// facilitator panel with the clock, agenda timebox, timers and the running tallies.
+/// Draws Aria's video tile: presence orb and meeting clock across the top, a caption strip, and
+/// summary cards of what she has picked up, or one list in full when someone asks for it.
 /// </summary>
 /// <remarks>
 /// Rendered with GDI+ into one reused BGRA bitmap and converted to NV12, the raw format the media
-/// platform encodes. One renderer per call; not thread-safe.
+/// platform encodes. Laid out on a 1280x720 canvas and scaled. One renderer per call; not thread-safe.
 /// </remarks>
 public sealed class FacilitatorTileRenderer : IDisposable
 {
@@ -49,15 +62,23 @@ public sealed class FacilitatorTileRenderer : IDisposable
     private static readonly Color Ok = Color.FromArgb(52, 211, 153);
     private static readonly Color Warn = Color.FromArgb(251, 191, 36);
     private static readonly Color Over = Color.FromArgb(248, 113, 113);
+    private static readonly Color DecisionTone = Color.FromArgb(96, 165, 250);
+    private static readonly Color ActionTone = Color.FromArgb(52, 211, 153);
+    private static readonly Color TrackedTone = Color.FromArgb(244, 114, 182);
+
+    // Typographic formats add no padding, so text measured for a box fits it exactly.
+    private static readonly StringFormat RightAligned = new(StringFormat.GenericTypographic) { Alignment = StringAlignment.Far };
+    private static readonly StringFormat Centred = new(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center };
 
     private readonly Bitmap _bitmap;
     private readonly Graphics _g;
-    private readonly float _scale;
     private readonly Font _title;
     private readonly Font _name;
     private readonly Font _body;
+    private readonly Font _item;
     private readonly Font _small;
     private readonly Font _big;
+    private readonly Font _count;
     private readonly Font _label;
     private readonly Font _caption;
     private readonly byte[] _nv12;
@@ -66,21 +87,22 @@ public sealed class FacilitatorTileRenderer : IDisposable
     {
         Width = width;
         Height = height;
-        _scale = width / 1280f;
         _bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         _g = Graphics.FromImage(_bitmap);
         _g.SmoothingMode = SmoothingMode.AntiAlias;
         _g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
         _g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        _g.ScaleTransform(_scale, _scale);
+        _g.ScaleTransform(width / 1280f, height / 720f);
 
         _title = new Font("Segoe UI Semibold", 26, GraphicsUnit.Pixel);
-        _name = new Font("Segoe UI Semibold", 46, GraphicsUnit.Pixel);
-        _body = new Font("Segoe UI", 22, GraphicsUnit.Pixel);
-        _small = new Font("Segoe UI", 17, GraphicsUnit.Pixel);
-        _big = new Font("Segoe UI Light", 54, GraphicsUnit.Pixel);
+        _name = new Font("Segoe UI Semibold", 34, GraphicsUnit.Pixel);
+        _body = new Font("Segoe UI", 21, GraphicsUnit.Pixel);
+        _item = new Font("Segoe UI", 19, GraphicsUnit.Pixel);
+        _small = new Font("Segoe UI", 16, GraphicsUnit.Pixel);
+        _big = new Font("Segoe UI Light", 50, GraphicsUnit.Pixel);
+        _count = new Font("Segoe UI Semibold", 36, GraphicsUnit.Pixel);
         _label = new Font("Segoe UI Semibold", 15, GraphicsUnit.Pixel);
-        _caption = new Font("Segoe UI", 23, FontStyle.Italic, GraphicsUnit.Pixel);
+        _caption = new Font("Segoe UI", 21, FontStyle.Italic, GraphicsUnit.Pixel);
         _nv12 = new byte[width * height * 3 / 2];
     }
 
@@ -97,30 +119,35 @@ public sealed class FacilitatorTileRenderer : IDisposable
         }
 
         DrawPresence(s, seconds);
-        DrawPanel(s);
-        DrawCaption(s);
+
+        if (s.View == TileView.Overview)
+        {
+            DrawHeader(s);
+            DrawCaption(s, 340);
+            DrawCards(s);
+        }
+        else
+        {
+            DrawBreakdown(s);
+        }
+
         return ToNv12();
     }
 
+    // ---- Presence (left column) ---------------------------------------------------------
+
     private void DrawPresence(TileState s, double t)
     {
-        const float cx = 250, cy = 280, r = 112;
-        Color tone = s.Presence switch
-        {
-            AgentPresence.Listening => Color.FromArgb(45, 212, 191),
-            AgentPresence.Thinking => Warn,
-            AgentPresence.Speaking => Color.FromArgb(167, 139, 250),
-            _ => Color.FromArgb(110, 106, 240),
-        };
+        const float cx = 150, cy = 120, r = 72;
+        const float k = r / 112f;
+        Color tone = Tone(s.Presence);
 
-        // Halo rings breathe slowly at rest and quickly while speaking.
         double speed = s.Presence == AgentPresence.Speaking ? 3.2 : 1.1;
         for (int i = 0; i < 3; i++)
         {
             double phase = ((t * speed / 2.5) + (i / 3.0)) % 1.0;
-            float rr = r + (float)(phase * 70);
-            int alpha = (int)(90 * (1 - phase));
-            using Pen ring = new(Color.FromArgb(alpha, tone), 3f);
+            float rr = r + (float)(phase * 42);
+            using Pen ring = new(Color.FromArgb((int)(90 * (1 - phase)), tone), 2.5f);
             _g.DrawEllipse(ring, cx - rr, cy - rr, rr * 2, rr * 2);
         }
 
@@ -131,7 +158,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
             {
                 CenterColor = Lighten(tone, 0.55f),
                 SurroundColors = [Color.FromArgb(255, (int)(tone.R * 0.45), (int)(tone.G * 0.45), (int)(tone.B * 0.55))],
-                CenterPoint = new PointF(cx - 30, cy - 36),
+                CenterPoint = new PointF(cx - (20 * k), cy - (24 * k)),
             };
             _g.FillPath(fill, orb);
         }
@@ -142,17 +169,16 @@ public sealed class FacilitatorTileRenderer : IDisposable
                 for (int i = 0; i < 5; i++)
                 {
                     double level = 0.35 + (0.65 * Math.Abs(Math.Sin((t * 7.5) + (i * 1.3)) * Math.Sin((t * 3.1) + i)));
-                    float h = (float)(16 + (level * 76));
-                    float x = cx - 58 + (i * 26);
-                    FillRounded(Color.FromArgb(235, 255, 255, 255), x, cy - (h / 2), 14, h, 7);
+                    float h = (float)((16 + (level * 76)) * k);
+                    FillRounded(Color.FromArgb(235, 255, 255, 255), cx - (58 * k) + (i * 26 * k), cy - (h / 2), 14 * k, h, 7 * k);
                 }
 
                 break;
 
             case AgentPresence.Thinking:
-                using (Pen arc = new(Color.FromArgb(230, 255, 255, 255), 9f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                using (Pen arc = new(Color.FromArgb(230, 255, 255, 255), 7f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 {
-                    _g.DrawArc(arc, cx - 52, cy - 52, 104, 104, (float)(t * 300 % 360), 110);
+                    _g.DrawArc(arc, cx - 34, cy - 34, 68, 68, (float)(t * 300 % 360), 110);
                 }
 
                 break;
@@ -161,9 +187,9 @@ public sealed class FacilitatorTileRenderer : IDisposable
                 for (int i = 0; i < 3; i++)
                 {
                     double pulse = 0.5 + (0.5 * Math.Sin((t * 4) - (i * 0.9)));
-                    float d = (float)(14 + (pulse * 8));
+                    float d = (float)(10 + (pulse * 6));
                     using SolidBrush dot = new(Color.FromArgb(235, 255, 255, 255));
-                    _g.FillEllipse(dot, cx - 40 + (i * 40) - (d / 2), cy - (d / 2), d, d);
+                    _g.FillEllipse(dot, cx - 26 + (i * 26) - (d / 2), cy - (d / 2), d, d);
                 }
 
                 break;
@@ -171,156 +197,278 @@ public sealed class FacilitatorTileRenderer : IDisposable
             default:
                 using (SolidBrush glyph = new(Color.FromArgb(240, 255, 255, 255)))
                 using (StringFormat center = new() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                using (Font letter = new("Segoe UI Semibold", 92, GraphicsUnit.Pixel))
+                using (Font letter = new("Segoe UI Semibold", 60, GraphicsUnit.Pixel))
                 {
-                    _g.DrawString(s.AgentName.Length > 0 ? s.AgentName[..1].ToUpperInvariant() : "A", letter, glyph, new RectangleF(cx - r, cy - r - 4, r * 2, r * 2), center);
+                    _g.DrawString(s.AgentName.Length > 0 ? s.AgentName[..1].ToUpperInvariant() : "A", letter, glyph, new RectangleF(cx - r, cy - r - 3, r * 2, r * 2), center);
                 }
 
                 break;
         }
-
-        using StringFormat c = new() { Alignment = StringAlignment.Center };
-        Text(s.AgentName, _name, Color.White, new RectangleF(cx - 220, cy + 150, 440, 60), c);
-        Text(Ellipsize(s.Specialism ?? "AI meeting facilitator", _small, 440), _small, Muted, new RectangleF(cx - 220, cy + 206, 440, 26), c);
+        Text(s.AgentName, _name, Color.White, new RectangleF(cx - 140, cy + 92, 280, 44), Centred);
+        Text(Ellipsize(s.Specialism ?? "AI meeting facilitator", _small, 270), _small, Muted, new RectangleF(cx - 140, cy + 134, 280, 22), Centred);
 
         string status = s.Presence switch
         {
             AgentPresence.Listening => "Listening",
             AgentPresence.Thinking => "Working on it",
             AgentPresence.Speaking => "Speaking",
-            _ => $"Say \u201C{s.AgentName}\u201D to ask",
+            _ => $"Say \u201C{s.AgentName}\u201D",
         };
 
         SizeF size = _g.MeasureString(status, _label);
-        float pw = size.Width + 34, px = cx - (pw / 2), py = cy + 246;
-        FillRounded(Color.FromArgb(60, tone), px, py, pw, 34, 17);
+        float pw = size.Width + 34, px = cx - (pw / 2), py = cy + 164;
+        FillRounded(Color.FromArgb(60, tone), px, py, pw, 30, 15);
         using (SolidBrush dot = new(tone))
         {
-            _g.FillEllipse(dot, px + 12, py + 12, 10, 10);
+            _g.FillEllipse(dot, px + 12, py + 10, 10, 10);
         }
 
-        Text(status, _label, Color.White, new RectangleF(px + 26, py + 7, pw - 26, 24), null);
+        Text(status, _label, Color.White, new RectangleF(px + 26, py + 5, pw - 26, 22), null);
     }
 
-    private void DrawPanel(TileState s)
+    // ---- Overview: header, caption, cards ----------------------------------------------
+
+    private void DrawHeader(TileState s)
     {
-        const float x = 520, y = 40, w = 720, h = 520;
-        FillRounded(Color.FromArgb(22, 255, 255, 255), x, y, w, h, 22);
+        const float x = 310, y = 22, w = 948, h = 300;
+        FillRounded(Color.FromArgb(22, 255, 255, 255), x, y, w, h, 20);
 
-        float cy = y + 26;
-        Text(Ellipsize(s.Subject ?? "Teams meeting", _title, w - 60), _title, Color.White, new RectangleF(x + 30, cy, w - 60, 36), null);
-        cy += 44;
+        Text(Ellipsize(s.Subject ?? "Teams meeting", _title, w - 360), _title, Color.White, new RectangleF(x + 26, y + 18, w - 360, 34), null);
 
-        // Meeting clock.
-        Text(Clock(s.Elapsed), _big, Color.White, new RectangleF(x + 26, cy - 6, 260, 70), null);
-        Text("elapsed", _small, Muted, new RectangleF(x + 32, cy + 60, 120, 24), null);
-
-        if (s.Remaining is { } left)
+        // Clock, top right of the panel.
         {
-            bool over = left < TimeSpan.Zero;
-            string remaining = over ? $"+{Minutes(-left)} over" : $"{Minutes(left)} left";
-            using StringFormat right = new() { Alignment = StringAlignment.Far };
-            Text(remaining, _title, over ? Over : left.TotalMinutes <= 5 ? Warn : Color.White, new RectangleF(x + w - 330, cy + 8, 300, 36), right);
-            Text("in this meeting", _small, Muted, new RectangleF(x + w - 330, cy + 46, 300, 24), right);
-
-            if (s.ScheduledLength is { TotalSeconds: > 0 } length)
+            Text(Clock(s.Elapsed), _big, Color.White, new RectangleF(x + w - 330, y + 4, 300, 62), RightAligned);
+            string sub = "elapsed";
+            Color tone = Muted;
+            if (s.Remaining is { } left)
             {
-                double used = Math.Clamp(s.Elapsed.TotalSeconds / length.TotalSeconds, 0, 1);
-                Bar(x + 30, cy + 96, w - 60, 8, used, over ? Over : used > 0.85 ? Warn : Ok);
+                bool over = left < TimeSpan.Zero;
+                sub = over ? $"+{Minutes(-left)} over" : $"{Minutes(left)} left";
+                tone = over ? Over : left.TotalMinutes <= 5 ? Warn : Muted;
             }
+
+            Text(sub, _label, tone, new RectangleF(x + w - 330, y + 66, 300, 22), RightAligned);
         }
 
-        cy += 124;
+        if (s.ScheduledLength is { TotalSeconds: > 0 } length)
+        {
+            double used = Math.Clamp(s.Elapsed.TotalSeconds / length.TotalSeconds, 0, 1);
+            bool over = s.Remaining is { } r && r < TimeSpan.Zero;
+            Bar(x + 26, y + 98, w - 52, 6, used, over ? Over : used > 0.85 ? Warn : Ok);
+        }
 
-        // Agenda.
-        Text("NOW", _label, Muted, new RectangleF(x + 30, cy, 200, 22), null);
+        float cy = y + 120;
+        Text("NOW", _label, Muted, new RectangleF(x + 26, cy, 100, 20), null);
+
         if (s.Agenda.Current is { } item)
         {
-            using StringFormat right = new() { Alignment = StringAlignment.Far };
-            Text($"{s.Agenda.CurrentIndex + 1} of {s.Agenda.Items.Count}", _label, Muted, new RectangleF(x + w - 230, cy, 200, 22), right);
-            cy += 24;
-            Text(Ellipsize(item.Title, _title, w - 60), _title, Color.White, new RectangleF(x + 30, cy, w - 60, 36), null);
-            cy += 42;
+            Text($"Item {s.Agenda.CurrentIndex + 1} of {s.Agenda.Items.Count}", _label, Muted, new RectangleF(x + w - 230, cy, 204, 20), RightAligned);
+            Text(Ellipsize(item.Title, _title, w - 52), _title, Color.White, new RectangleF(x + 26, cy + 22, w - 52, 34), null);
 
+            float by = cy + 70;
             if (item.Minutes is { } minutes && minutes > 0)
             {
                 double used = s.Agenda.CurrentElapsed.TotalMinutes / minutes;
                 Color tone = used >= 1 ? Over : used >= 0.75 ? Warn : Ok;
-                Bar(x + 30, cy + 4, w - 240, 12, Math.Min(used, 1), tone);
+                Bar(x + 26, by + 6, w - 260, 12, Math.Min(used, 1), tone);
                 TimeSpan rem = s.Agenda.CurrentRemaining ?? TimeSpan.Zero;
-                string label = rem >= TimeSpan.Zero ? $"{Clock(rem)} left" : $"+{Clock(-rem)} over";
-                using StringFormat r2 = new() { Alignment = StringAlignment.Far };
-                Text(label, _body, tone, new RectangleF(x + w - 200, cy - 6, 170, 30), r2);
+                Text(rem >= TimeSpan.Zero ? $"{Clock(rem)} left" : $"+{Clock(-rem)} over", _body, tone, new RectangleF(x + w - 220, by - 4, 194, 30), RightAligned);
             }
             else
             {
-                Text($"{Clock(s.Agenda.CurrentElapsed)} on this item", _body, Muted, new RectangleF(x + 30, cy - 6, 400, 30), null);
+                Text($"{Clock(s.Agenda.CurrentElapsed)} on this item", _body, Muted, new RectangleF(x + 26, by - 4, 400, 30), null);
             }
 
-            cy += 34;
             string next = s.Agenda.Next is { } n ? $"Next: {n.Title}" : "Last item";
-            Text(Ellipsize(next, _body, w - 60), _body, Muted, new RectangleF(x + 30, cy, w - 60, 30), null);
-            cy += 40;
+            Text(Ellipsize(next, _body, w - 340), _body, Muted, new RectangleF(x + 26, by + 34, w - 340, 30), null);
         }
         else
         {
-            cy += 26;
-            string hint = s.Agenda.Items.Count > 0 ? "Agenda complete" : $"No agenda yet. Say \u201C{s.AgentName}, our agenda is\u2026\u201D";
-            Text(Ellipsize(hint, _body, w - 60), _body, Muted, new RectangleF(x + 30, cy, w - 60, 30), null);
-            cy += 74;
+            string hint = s.Agenda.Items.Count > 0 ? "Agenda complete" : $"No agenda yet \u00B7 say \u201C{s.AgentName}, our agenda is\u2026\u201D";
+            Text(Ellipsize(hint, _body, w - 52), _body, Muted, new RectangleF(x + 26, cy + 26, w - 52, 30), null);
         }
 
-        // Timer.
         if (s.Timer is { } timer)
         {
             TimeSpan rem = timer.EndsAt - DateTimeOffset.UtcNow;
-            FillRounded(Color.FromArgb(40, Warn), x + 30, cy, w - 60, 40, 12);
-            Text(Ellipsize($"Timer \u00B7 {timer.Label}", _body, w - 220), _body, Color.White, new RectangleF(x + 46, cy + 5, w - 220, 30), null);
-            using StringFormat right = new() { Alignment = StringAlignment.Far };
-            Text(Clock(rem < TimeSpan.Zero ? TimeSpan.Zero : rem), _title, Warn, new RectangleF(x + w - 200, cy + 1, 156, 36), right);
-        }
-
-        // Tallies.
-        float ty = y + h - 78;
-        Chip(x + 30, ty, "Decisions", s.Decisions);
-        Chip(x + 250, ty, "Actions", s.Actions);
-        Chip(x + 470, ty, "Parked", s.Parked);
-
-        if (s.Restricted)
-        {
-            FillRounded(Color.FromArgb(70, Warn), x, y + h + 14, w, 36, 12);
-            using StringFormat c = new() { Alignment = StringAlignment.Center };
-            Text("External guest present \u00B7 internal data is off", _label, Color.White, new RectangleF(x, y + h + 22, w, 24), c);
+            float tx = x + w - 300, ty = y + h - 54;
+            FillRounded(Color.FromArgb(46, Warn), tx, ty, 274, 38, 12);
+            Text(Ellipsize(timer.Label, _small, 160), _small, Color.White, new RectangleF(tx + 14, ty + 9, 160, 22), null);
+            Text(Clock(rem < TimeSpan.Zero ? TimeSpan.Zero : rem), _title, Warn, new RectangleF(tx + 150, ty + 1, 110, 34), RightAligned);
         }
     }
 
-    private void DrawCaption(TileState s)
+    private void DrawCaption(TileState s, float y)
     {
-        if (string.IsNullOrWhiteSpace(s.Caption) || s.CaptionAt is not { } at)
+        string text;
+        int alpha = 255;
+        if (!string.IsNullOrWhiteSpace(s.Caption) && s.CaptionAt is { } at && (DateTimeOffset.UtcNow - at).TotalSeconds <= 25)
         {
-            Text($"Notes on \u00B7 {s.People} in meeting", _small, Muted, new RectangleF(40, 660, 440, 26), null);
+            double age = (DateTimeOffset.UtcNow - at).TotalSeconds;
+            alpha = age < 20 ? 255 : (int)(255 * (25 - age) / 5);
+            text = "\u201C" + s.Caption.Trim() + "\u201D";
+        }
+        else if (s.Restricted)
+        {
+            FillRounded(Color.FromArgb(70, Warn), 22, y, 1236, 40, 12);
+            Text("External guest present \u00B7 internal data is off", _label, Color.White, new RectangleF(22, y + 11, 1236, 22), Centred);
+            return;
+        }
+        else
+        {
+            Text($"Notes on \u00B7 {s.People} in meeting \u00B7 say \u201C{s.AgentName}, show the actions\u201D for detail", _small, Muted, new RectangleF(30, y + 10, 1220, 22), null);
             return;
         }
 
-        double age = (DateTimeOffset.UtcNow - at).TotalSeconds;
-        if (age > 25)
+        FillRounded(Color.FromArgb(alpha * 110 / 255, 0, 0, 0), 22, y, 1236, 40, 12);
+        Text(Ellipsize(text, _caption, 1196), _caption, Color.FromArgb(alpha, 255, 255, 255), new RectangleF(40, y + 7, 1196, 30), null);
+    }
+
+    private void DrawCards(TileState s)
+    {
+        const float y = 392, h = 306, gap = 18, w = (1236 - (2 * gap)) / 3f;
+
+        DrawCard(22, y, w, h, "Decisions", s.Decisions.Count, DecisionTone,
+            [.. s.Decisions.TakeLast(3).Reverse().Select(d => (d, (string?)null))]);
+
+        DrawCard(22 + w + gap, y, w, h, "Actions", s.Actions.Count, ActionTone,
+            [.. s.Actions.TakeLast(3).Reverse().Select(a => (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 " + a.Due)}"))]);
+
+        // Specialist tracking when a skill is active; otherwise the parking lot.
+        List<(string, string?)> tracked = [.. s.Tracked
+            .SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key)))
+            .TakeLast(3).Reverse()];
+        int trackedCount = s.Tracked.Sum(kv => kv.Value.Count);
+        if (trackedCount > 0)
         {
-            Text($"Notes on \u00B7 {s.People} in meeting", _small, Muted, new RectangleF(40, 660, 440, 26), null);
-            return;
+            DrawCard(22 + (2 * (w + gap)), y, w, h, "Tracked", trackedCount, TrackedTone, tracked,
+                s.Parked.Count > 0 ? $"+ {s.Parked.Count} parked" : null);
+        }
+        else
+        {
+            DrawCard(22 + (2 * (w + gap)), y, w, h, "Parked", s.Parked.Count, Warn,
+                [.. s.Parked.TakeLast(3).Reverse().Select(p => (p, (string?)null))]);
+        }
+    }
+
+    private void DrawCard(float x, float y, float w, float h, string title, int count, Color tone, IReadOnlyList<(string Text, string? Meta)> items, string? footer = null)
+    {
+        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 18);
+        FillRounded(tone, x, y + 18, 5, 40, 2.5f);
+
+        Text(count.ToString(), _count, Color.White, new RectangleF(x + 22, y + 10, 90, 46), null);
+        float countWidth = _g.MeasureString(count.ToString(), _count, PointF.Empty, StringFormat.GenericTypographic).Width;
+        Text(title.ToUpperInvariant(), _label, tone, new RectangleF(x + 30 + countWidth, y + 26, w - countWidth - 50, 20), null);
+
+        float iy = y + 70;
+        if (items.Count == 0)
+        {
+            Text("Nothing yet", _item, Muted, new RectangleF(x + 22, iy, w - 44, 26), null);
         }
 
-        int alpha = age < 20 ? 255 : (int)(255 * (25 - age) / 5);
-        FillRounded(Color.FromArgb(alpha * 140 / 255, 0, 0, 0), 40, 610, 1200, 80, 16);
-        string text = s.Caption.Length > 170 ? "\u2026" + s.Caption[^168..] : s.Caption;
-        Text(text, _caption, Color.FromArgb(alpha, 255, 255, 255), new RectangleF(62, 618, 1156, 66), null);
+        foreach ((string text, string? meta) in items)
+        {
+            using (SolidBrush bullet = new(tone))
+            {
+                _g.FillEllipse(bullet, x + 22, iy + 10, 7, 7);
+            }
+
+            foreach (string line in Wrap(text, _item, w - 60, meta is null ? 2 : 1))
+            {
+                Text(line, _item, Color.White, new RectangleF(x + 38, iy, w - 60, 26), null);
+                iy += 25;
+            }
+
+            if (meta is not null)
+            {
+                Text(Ellipsize(meta, _small, w - 60), _small, Muted, new RectangleF(x + 38, iy, w - 60, 22), null);
+                iy += 22;
+            }
+
+            iy += 14;
+        }
+
+        if (footer is not null)
+        {
+            Text(footer, _small, Muted, new RectangleF(x + 22, y + h - 32, w - 44, 22), null);
+        }
     }
 
-    private void Chip(float x, float y, string label, int value)
+    // ---- Breakdown view ----------------------------------------------------------------
+
+    private void DrawBreakdown(TileState s)
     {
-        FillRounded(Color.FromArgb(30, 255, 255, 255), x, y, 200, 54, 14);
-        Text(value.ToString(), _title, Color.White, new RectangleF(x + 16, y + 9, 60, 36), null);
-        Text(label, _small, Muted, new RectangleF(x + 70, y + 16, 124, 26), null);
+        const float x = 310, y = 22, w = 948, h = 676;
+        (string title, Color tone, List<(string Text, string? Meta)> items) = s.View switch
+        {
+            TileView.Actions => ("Actions", ActionTone, s.Actions.Select(a =>
+                (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 due " + a.Due)}")).ToList()),
+            TileView.Decisions => ("Decisions", DecisionTone, s.Decisions.Select(d => (d, (string?)null)).ToList()),
+            TileView.Parked => ("Parking lot", Warn, s.Parked.Select(p => (p, (string?)null)).ToList()),
+            TileView.Tracked => ("Tracked", TrackedTone, s.Tracked.SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key))).ToList()),
+            _ => ("Agenda", Ok, s.Agenda.Items.Select((a, i) => (
+                $"{(s.Agenda.Completed.Contains(i) ? "\u2713 " : i == s.Agenda.CurrentIndex ? "\u25B6 " : string.Empty)}{a.Title}",
+                (string?)(a.Minutes is { } m ? $"{m:0.#} min" : null))).ToList()),
+        };
+
+        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 20);
+        FillRounded(tone, x, y + 24, 6, 44, 3);
+        Text(title, _name, Color.White, new RectangleF(x + 28, y + 18, w - 300, 48), null);
+        {
+            Text($"{items.Count} total", _body, Muted, new RectangleF(x + w - 260, y + 30, 232, 30), RightAligned);
+        }
+
+        Text(Ellipsize(s.Subject ?? string.Empty, _small, w - 56), _small, Muted, new RectangleF(x + 28, y + 70, w - 56, 22), null);
+
+        const int maxRows = 10;
+        IEnumerable<(string Text, string? Meta)> shown = items.Count > maxRows ? items.Skip(items.Count - maxRows) : items;
+        int number = Math.Max(0, items.Count - maxRows);
+        float iy = y + 112;
+
+        if (items.Count == 0)
+        {
+            Text("Nothing recorded yet.", _body, Muted, new RectangleF(x + 28, iy, w - 56, 30), null);
+        }
+
+        foreach ((string text, string? meta) in shown)
+        {
+            number++;
+            {
+                Text($"{number}", _body, tone, new RectangleF(x + 20, iy, 34, 30), RightAligned);
+            }
+
+            float metaWidth = meta is null ? 0 : Math.Min(300, _g.MeasureString(meta, _item, PointF.Empty, StringFormat.GenericTypographic).Width + 8);
+            Text(Ellipsize(text, _body, w - 110 - metaWidth), _body, Color.White, new RectangleF(x + 68, iy, w - 110 - metaWidth, 30), null);
+            if (meta is not null)
+            {
+                Text(Ellipsize(meta, _item, 300), _item, Muted, new RectangleF(x + w - 28 - metaWidth, iy + 2, metaWidth, 28), RightAligned);
+            }
+
+            iy += 54;
+        }
+
+        if (items.Count > maxRows)
+        {
+            Text($"Showing the latest {maxRows}. The full list is in the recap.", _small, Muted, new RectangleF(x + 28, y + h - 34, w - 56, 22), null);
+        }
+
+        // Caption still matters in breakdown mode: it is how people see what Aria just said.
+        if (!string.IsNullOrWhiteSpace(s.Caption) && s.CaptionAt is { } at && (DateTimeOffset.UtcNow - at).TotalSeconds <= 25)
+        {
+            FillRounded(Color.FromArgb(110, 0, 0, 0), 22, 640, 270, 58, 12);
+            Text(Ellipsize("\u201C" + s.Caption.Trim() + "\u201D", _small, 250), _small, Color.White, new RectangleF(32, 657, 250, 24), null);
+        }
     }
+
+    // ---- Primitives ----------------------------------------------------------------------
+
+    private static Color Tone(AgentPresence presence) => presence switch
+    {
+        AgentPresence.Listening => Color.FromArgb(45, 212, 191),
+        AgentPresence.Thinking => Warn,
+        AgentPresence.Speaking => Color.FromArgb(167, 139, 250),
+        _ => Color.FromArgb(110, 106, 240),
+    };
 
     private void Bar(float x, float y, float w, float h, double fraction, Color tone)
     {
@@ -332,7 +480,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
     private void FillRounded(Color color, float x, float y, float w, float h, float radius)
     {
         using GraphicsPath path = new();
-        float d = Math.Min(radius * 2, Math.Min(w, h));
+        float d = Math.Max(0.5f, Math.Min(radius * 2, Math.Min(w, h)));
         path.AddArc(x, y, d, d, 180, 90);
         path.AddArc(x + w - d, y, d, d, 270, 90);
         path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
@@ -348,12 +496,43 @@ public sealed class FacilitatorTileRenderer : IDisposable
         _g.DrawString(text, font, brush, area, format ?? StringFormat.GenericTypographic);
     }
 
+    /// <summary>Word-wraps to at most <paramref name="maxLines"/>, ellipsizing the last line.</summary>
+    private List<string> Wrap(string text, Font font, float width, int maxLines)
+    {
+        List<string> lines = [];
+        string[] words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string current = string.Empty;
+        int i = 0;
+
+        for (; i < words.Length && lines.Count < maxLines - 1; i++)
+        {
+            string candidate = current.Length == 0 ? words[i] : current + " " + words[i];
+            if (current.Length > 0 && _g.MeasureString(candidate, font, PointF.Empty, StringFormat.GenericTypographic).Width > width)
+            {
+                lines.Add(current);
+                current = words[i];
+            }
+            else
+            {
+                current = candidate;
+            }
+        }
+
+        string rest = string.Join(' ', new[] { current }.Concat(words.Skip(i)).Where(s => s.Length > 0));
+        if (rest.Length > 0)
+        {
+            lines.Add(Ellipsize(rest, font, width));
+        }
+
+        return lines;
+    }
+
     private string Ellipsize(string text, Font font, float width)
     {
         // Measured with the same format it is drawn with, or small sizes clip the last glyphs.
         float Measure(string s) => _g.MeasureString(s, font, PointF.Empty, StringFormat.GenericTypographic).Width;
 
-        if (Measure(text) <= width)
+        if (width <= 0 || Measure(text) <= width)
         {
             return text;
         }
@@ -435,8 +614,10 @@ public sealed class FacilitatorTileRenderer : IDisposable
         _title.Dispose();
         _name.Dispose();
         _body.Dispose();
+        _item.Dispose();
         _small.Dispose();
         _big.Dispose();
+        _count.Dispose();
         _label.Dispose();
         _caption.Dispose();
     }

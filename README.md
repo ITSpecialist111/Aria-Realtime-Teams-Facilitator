@@ -10,13 +10,15 @@ Aria joins a Teams meeting as a participant, listens to the whole conversation, 
 
 ## Demo
 
-**Aria's video tile.** Rendered by the bot and streamed into the meeting at 15 fps. The orb shows ready, listening, thinking or speaking. The panel shows the meeting clock, the current agenda item with its timebox, the next item, any running timer, and tallies of decisions, actions and parked topics. Her last spoken line appears as a caption.
+**Aria's video tile.** Rendered by the bot and streamed into the meeting at 15 fps. Across the top: the presence orb (ready, listening, thinking or speaking), the meeting clock, the current agenda item with its timebox, the next item and any running timer. Below that is a caption strip with her last spoken line, then three summary cards showing what she has picked up: **Decisions**, **Actions** (with owner and due date) and **Tracked** items from the active skills (or the parking lot). Each card shows the latest items.
 
-![Aria's facilitator tile: speaking state, construction and project-delivery skills active, agenda item 2 of 4 with 1:30 left, a running timer, and a caption of her last answer](docs/media/tile-sample.png)
+![Aria's facilitator tile: speaking, construction skills active, agenda item 2 of 4 with 1:30 left, a running timer, caption, and Decisions, Actions and Tracked cards](docs/media/tile-sample.png)
 
-*Sample render from the same code that streams into the call (sample data). The same view turns red when an item overruns, and shows a banner when an external guest is present:*
+Ask for detail ("Aria, show us the actions") and the tile switches to a full list for 90 seconds, then returns to the overview. Decisions, tracked items, the parking lot and the agenda work the same way:
 
-<img src="docs/media/tile-overrun.png" alt="Tile showing an overrunning agenda item, meeting over time, and the external-guest banner" width="480">
+<img src="docs/media/tile-actions.png" alt="Breakdown view listing every action with owner and due date" width="480"> <img src="docs/media/tile-overrun.png" alt="Overview with an overrunning agenda item, meeting over time, and the external-guest banner" width="480">
+
+*Sample renders from the same code that streams into the call (sample data).*
 
 **Early voice demo.**
 [![Aria in a Teams meeting. Click to play the demo video with audio.](docs/media/aria-in-meeting.png)](docs/media/aria-demo.mp4)
@@ -71,7 +73,7 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Answers only when addressed** | Continuous transcription. A reply starts only when the agent's name is said as a whole word. The same speaker can ask a follow-up within 10 s without repeating the name. |
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
 | **Meeting memory** | A text model folds the conversation into running notes every 45 s: summary, decisions, action items and open questions. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
-| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
+| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `show_on_screen`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
 | **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
 | **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
 | **Work IQ** | Mail, calendar, files, chats and people lookups through the Work IQ MCP server, run as a delegated service account. |
@@ -508,6 +510,7 @@ In a meeting:
 - *"Aria, let's move on."* / *"Aria, give us two more minutes."* / *"Aria, park that."*
 - *"Aria, log an RFI: Sam needs the revised steel details by Thursday."* (with the construction skill)
 - *"Aria, what haven't we covered?"*
+- *"Aria, show us the actions."* / *"...the decisions"* / *"...the agenda"* / *"Aria, back to the overview."*
 - `@Aria` in the meeting chat for a written answer.
 
 ---

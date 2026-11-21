@@ -90,6 +90,21 @@ public sealed class MeetingContext
 
     public AgentProfile Profile { get; set; } = AgentProfile.Default;
 
+    private RtBot.Media.TileView _view;
+    private DateTimeOffset _viewSetAt;
+
+    /// <summary>The tile's current view; a breakdown reverts to the overview after 90 seconds.</summary>
+    public RtBot.Media.TileView CurrentView =>
+        _view != RtBot.Media.TileView.Overview && DateTimeOffset.UtcNow - _viewSetAt < TimeSpan.FromSeconds(90)
+            ? _view
+            : RtBot.Media.TileView.Overview;
+
+    public void ShowView(RtBot.Media.TileView view)
+    {
+        _viewSetAt = DateTimeOffset.UtcNow;
+        _view = view;
+    }
+
     public IReadOnlyList<MeetingSkill> ActiveSkills
     {
         get

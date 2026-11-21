@@ -44,7 +44,7 @@
   </ItemGroup>
 
   <ItemGroup Label="Platform">
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.15" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <!-- GDI+ renders the facilitator video tile; the host is Windows-only anyway. -->

@@ -8,6 +8,8 @@ Aria joins a Teams meeting as a participant, listens to the whole conversation, 
 
 > Status: working proof of concept. It runs end to end against a real tenant. See [Limitations](#limitations) before relying on it.
 
+**AI teammate.** Aria is an Agent 365 AI teammate with her own Entra user account and mailbox. Invite her to a meeting like a colleague and she joins when it starts. Work IQ, mail and calendar run **as Aria**, not as a borrowed human account.
+
 ## Demo
 
 **Aria's video tile.** Rendered by the bot and streamed into the meeting at 15 fps. Across the top: the presence orb (ready, listening, thinking or speaking), the meeting clock, the current agenda item with its timebox, the next item and any running timer. Below that is a caption strip with her last spoken line, then three summary cards showing what she has picked up: **Decisions**, **Actions** (with owner and due date) and **Tracked** items from the active skills (or the parking lot). Each card shows the latest items.
@@ -85,6 +87,8 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Vision** | `look_at` answers a question about the screen share or whatever the speaker holds up to their camera. `capture_visual` records it: title, summary, key points, plus any actions, decisions and tracked items written on it. The image is shown on the tile and embedded in the email. Frames are taken on demand only. |
 | **Chat** | Every meeting-chat message goes into the notes, so actions typed in chat are picked up. Aria replies only when @mentioned. |
 | **Work IQ** | Mail, calendar, files, chats and people lookups through the Work IQ MCP server, run as a delegated service account. |
+| **AI teammate** | With `AgentIdentity` configured, Aria acts as her own Agent 365 agent user. Tokens come from the Entra Agent ID user flow (blueprint, agent identity, `user_fic`), with the host's managed identity as the blueprint credential, so the VM holds no secret for it. The service account remains as a fallback. |
+| **Invite her like a colleague** | Aria polls her own calendar every minute and joins any Teams meeting she's invited to as it starts. Declining or removing her keeps her out. Links rewritten by Defender Safe Links are unwrapped. |
 | **Meeting chat** | Posts a join notice and the recap through Bot Framework proactive messaging. Answers @mentions with the same tools and notes as the voice path. |
 | **Time-keeping** | Keeps each agenda item to its timebox and, when one overruns, asks whether to move on, extend or park it. Gives a halfway check and a wrap-up warning that lists anything the active skills say hasn't been covered. |
 | **External-guest policy** | When a guest, phone dial-in, anonymous user or other-tenant user joins, Aria announces it and **withdraws organisation-data tools**. The alternative policy setting makes her leave. |
@@ -298,6 +302,8 @@ sequenceDiagram
 | `Controllers/PlatformCallController.cs` | Graph calling webhook. The SDK validates Graph's token on every notification. |
 | `Tools/ToolCatalog.cs` | MCP client connections (Work IQ and any extras) and tool-call spans. |
 | `Tools/DelegatedTokenProvider.cs` | Redeems the service account's refresh token for Work IQ and Graph scopes and persists rotations. |
+| `Tools/AgentUserTokenProvider.cs` | Acquires tokens as the Agent 365 AI teammate (Entra Agent ID user flow, managed identity as the blueprint credential), falling back to the service account. |
+| `Teams/CalendarAutoJoinService.cs` | Polls Aria's own calendar and joins Teams meetings she is invited to as they start. |
 | `Observability/AgentTelemetry.cs` | Agent 365 / OpenTelemetry span helpers. |
 
 ### Design decisions
@@ -351,6 +357,7 @@ The full decision record is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In 
 | Teams app | Built from [`teams-app/manifest.json`](teams-app/manifest.json) (replace `{{BOT_APP_ID}}` and `{{BOT_HOST}}`), uploaded to the org catalogue. |
 | Resource account (optional) | Teams resource account with a `PHONESYSTEM_VIRTUALUSER` licence, so users can call or add the agent from Teams. |
 | Work IQ service account | A licensed user the agent acts as for Work IQ and for sending the recap email. |
+| Agent 365 AI teammate (recommended) | Blueprint, agent identity and agent user created with the Agent 365 CLI (`a365 setup all --aiteammate --m365`). The agent user needs an Agent 365 licence and a mailbox. Replaces the service account. |
 | Work IQ | Generally available. Delegated only. Write actions are blocked unless an admin enables them. |
 | Agent 365 | For observability export. |
 | Teams application access policy | Lets the bot read `onlineMeetings` (subject and schedule) app-only. |
@@ -368,7 +375,16 @@ The full decision record is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In 
 | `TeamsAppInstallation.ReadWriteAndConsentSelfForChat.All` | Install itself into a meeting chat, granting its RSC permissions, so it can post and be @mentioned. |
 | `Agent365.Observability.OtelWrite` | Export telemetry to Agent 365 (service-to-service). |
 
-**Delegated grants for the service account only** (consent type `Principal`, not tenant-wide)
+**Delegated grants for the AI teammate** (client = agent identity, principal = agent user, consent type `Principal`)
+
+| Resource | Scopes | Used for |
+| --- | --- | --- |
+| Microsoft Graph | `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `OnlineMeetings.ReadWrite`, `User.ReadBasic.All` | Recap email from Aria's mailbox, reading invites (agenda and auto-join), resolving attendees. |
+| Work IQ | `WorkIQAgent.Ask` | Work IQ MCP as Aria. |
+
+The blueprint also needs a federated identity credential trusting the media host's managed identity (issuer `https://login.microsoftonline.com/<tenant>/v2.0`, subject = managed identity principal id, audience `api://AzureADTokenExchange`).
+
+**Delegated grants for the fallback service account** (consent type `Principal`, not tenant-wide)
 
 | Scope | Used for |
 | --- | --- |
@@ -393,7 +409,7 @@ The full decision record is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In 
 | Secrets at rest | No secrets in the repo or in configuration files. The client secret and the Work IQ refresh token are DPAPI-encrypted with the **machine** key on the VM (unreadable if copied off it). AI Services uses the managed identity. |
 | External participants | When anyone not provably internal is present, organisation-data tools are removed from the model's tool list **and** refused at dispatch, for both voice and chat. The model's instructions are not the security boundary. Policy options are `Restrict` (default), `Leave` or `Allow`. |
 | Email distribution | The report goes only to attendees in the agent's own tenant, plus the organiser. External attendees are never emailed. Every value is HTML-encoded. |
-| Prompt injection | Organisation-data tools act as the service account, so they can never see more than it can. Work IQ write actions stay disabled unless an admin enables them. Use a dedicated, least-privilege service account in production. |
+| Prompt injection | Organisation-data tools act as Aria's agent user (or the fallback service account), so they can never see more than she can: only what has been shared with her. Work IQ write actions stay disabled unless an admin enables them. |
 | Disclosure | Aria announces herself by voice and in chat on joining, says she is taking notes, and accepts requests to leave. |
 | Least privilege on mail | `Mail.Send` and `User.ReadBasic.All` are granted to the service account only. |
 | Certificates | Let's Encrypt via win-acme with automatic renewal. The service picks up the current certificate for the FQDN at start-up. |
@@ -408,8 +424,8 @@ The full decision record is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In 
 | --- | --- |
 | Meeting span (one per call) | Agent 365 (and Application Insights if configured). |
 | Tool-call spans (Work IQ and other MCP tools) | Agent 365. |
-| Work IQ requests | Microsoft Purview audit, as the service account. |
-| Recap emails | Service account's Sent Items and the Exchange audit log. |
+| Work IQ requests | Microsoft Purview audit, as Aria's agent user. |
+| Recap emails | Aria's Sent Items and the Exchange audit log. |
 | Graph and token activity | Entra sign-in logs for the bot's service principal. |
 | Service log | Windows Application event log (warnings and errors). |
 
@@ -457,6 +473,21 @@ Copy-Item scripts/deployment.example.ps1 scripts/deployment.local.ps1   # git-ig
 ```
 
 Grant the delegated scopes (`WorkIQAgent.Ask`, `Mail.Send`, `User.ReadBasic.All`) to the service account.
+
+### 5b. AI teammate (recommended)
+
+```powershell
+a365 setup all --agent-name "Aria" --aiteammate --m365 --messaging-endpoint https://<fqdn>/api/messages
+a365 publish --aiteammate          # then upload manifest.zip in the Microsoft 365 admin center
+```
+
+Create an instance from the admin center or Teams, which creates the agent user with a licence and mailbox. Then:
+
+1. Grant the agent identity the delegated scopes in the table above, with the agent user as principal.
+2. Add a federated identity credential on the blueprint for the media host's managed identity.
+3. Set `RtBot__AgentIdentity__Enabled=true`, `BlueprintId`, `AgentIdentityId`, `AgentUserId` and `AgentUserUpn` as machine environment variables, and restart.
+
+The start-up log shows `Acting as AI teammate <upn>` for each resource once the flow works.
 
 ### 6. Build and deploy
 

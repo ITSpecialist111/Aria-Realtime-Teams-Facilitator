@@ -376,10 +376,10 @@ public sealed class MeetingToolset
                 async (args, ct) =>
                 {
                     bool screen = Str(args, "source").Equals("screen", StringComparison.OrdinalIgnoreCase);
-                    (byte[]? jpeg, string? from) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
+                    (byte[]? jpeg, string? from, string? failure) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
                     if (jpeg is null)
                     {
-                        return Error(screen ? "Nobody is sharing their screen, or no frame arrived." : "No camera video arrived. The person may need to turn their camera on.");
+                        return Error(failure ?? "No picture arrived.");
                     }
 
                     string answer = await _textModel.DescribeImageAsync(_visionModel, Str(args, "question"), jpeg, ct).ConfigureAwait(false);
@@ -393,10 +393,10 @@ public sealed class MeetingToolset
                 async (args, ct) =>
                 {
                     bool screen = Str(args, "source").Equals("screen", StringComparison.OrdinalIgnoreCase);
-                    (byte[]? jpeg, string? from) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
+                    (byte[]? jpeg, string? from, string? failure) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
                     if (jpeg is null)
                     {
-                        return Error(screen ? "Nobody is sharing their screen, or no frame arrived." : "No camera video arrived. The person may need to turn their camera on.");
+                        return Error(failure ?? "No picture arrived.");
                     }
 
                     string categories = string.Join(", ", _meeting.ActiveSkills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));

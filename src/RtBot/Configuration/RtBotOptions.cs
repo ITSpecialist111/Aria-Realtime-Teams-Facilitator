@@ -11,6 +11,39 @@ public sealed class RtBotOptions
     public ToolsOptions Tools { get; set; } = new();
     public FacilitatorOptions Facilitator { get; set; } = new();
     public ObservabilityOptions Observability { get; set; } = new();
+    public AgentIdentityOptions AgentIdentity { get; set; } = new();
+}
+
+/// <summary>
+/// The Agent 365 AI teammate identity: when enabled, Work IQ, mail and calendar run as the agent's
+/// own Entra user account instead of a borrowed service account.
+/// </summary>
+public sealed class AgentIdentityOptions
+{
+    public bool Enabled { get; set; }
+
+    /// <summary>Agent identity blueprint application (client) id.</summary>
+    public string BlueprintId { get; set; } = string.Empty;
+
+    /// <summary>Agent identity (child of the blueprint) client id.</summary>
+    public string AgentIdentityId { get; set; } = string.Empty;
+
+    /// <summary>Object id of the agent's user account (the AI teammate).</summary>
+    public string AgentUserId { get; set; } = string.Empty;
+
+    /// <summary>The AI teammate's mailbox, shown in logs and recaps.</summary>
+    public string AgentUserUpn { get; set; } = string.Empty;
+
+    /// <summary>Use the service-account refresh token if the agent user flow fails.</summary>
+    public bool FallbackToServiceAccount { get; set; } = true;
+
+    /// <summary>Join Teams meetings on the agent's own calendar when they start.</summary>
+    public bool AutoJoinFromCalendar { get; set; } = true;
+
+    public int CalendarPollSeconds { get; set; } = 60;
+
+    /// <summary>Join this many minutes before the scheduled start.</summary>
+    public int JoinMinutesBeforeStart { get; set; } = 1;
 }
 
 public sealed class AzureAdOptions

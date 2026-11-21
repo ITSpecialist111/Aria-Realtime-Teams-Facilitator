@@ -25,3 +25,5 @@ artifacts-*.ps1
 meeting-link.txt
 
 /Screen Recording*.mp4
+
+.playwright-mcp/

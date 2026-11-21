@@ -22,7 +22,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     private static readonly TimeSpan MaxWaitForGap = TimeSpan.FromSeconds(8);
 
     // Longer than Work IQ's normal 10-15 s, short enough that the meeting isn't left waiting.
-    private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(25);
+    // Work IQ answers in 15-35 s, and a capture can spend 18 s waiting for frames before vision
+    // runs. Tools run off the receive loop, so a long wait costs no audio.
+    private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(45);
 
     private readonly VoiceOptions _options;
     private readonly VoiceLiveClient _client;

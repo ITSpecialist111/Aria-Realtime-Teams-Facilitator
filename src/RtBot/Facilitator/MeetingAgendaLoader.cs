@@ -87,7 +87,8 @@ public sealed partial class MeetingAgendaLoader
             JsonNode? invite = (JsonNode.Parse(json)?["value"] as JsonArray)?.FirstOrDefault(e =>
             {
                 string join = WebUtility.UrlDecode(e?["onlineMeeting"]?["joinUrl"]?.GetValue<string>() ?? string.Empty);
-                string text = WebUtility.UrlDecode(e?["body"]?["content"]?.GetValue<string>() ?? string.Empty);
+                // Decoded twice: Safe Links wraps the join link, encoding it a second time.
+                string text = WebUtility.UrlDecode(WebUtility.UrlDecode(e?["body"]?["content"]?.GetValue<string>() ?? string.Empty));
                 return (join.Length > 0 &&
                         (join.Contains(decodedThread, StringComparison.OrdinalIgnoreCase) ||
                          (joinUrl is not null && join.Equals(WebUtility.UrlDecode(joinUrl), StringComparison.OrdinalIgnoreCase))))

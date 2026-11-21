@@ -139,17 +139,13 @@ public sealed class TeamsCallingService : IAsyncDisposable
             [
                 new VideoSocketSettings
                 {
-                    // Aria's tile: a rendered facilitator view instead of the default bot placeholder.
-                    StreamDirections = StreamDirection.Sendonly,
+                    // One socket both ways: it sends Aria's rendered tile and, only while a capture
+                    // is requested, receives a participant's camera. The platform rejects a second
+                    // socket here unless every socket receives, and only one may send.
+                    StreamDirections = StreamDirection.Sendrecv,
                     SupportedSendVideoFormats = VideoTilePump.SupportedFormats,
                     MaxConcurrentSendStreams = 1,
-                },
-                new VideoSocketSettings
-                {
-                    // Participant cameras, subscribed only for the moment a capture is requested.
-                    StreamDirections = StreamDirection.Recvonly,
                     ReceiveColorFormat = VideoColorFormat.NV12,
-                    MediaType = MediaType.Video,
                 },
             ],
             new VideoSocketSettings

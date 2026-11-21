@@ -181,7 +181,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         }
 
         ILocalMediaSession media = _call.GetLocalMediaSession();
-        _visual = new VisualCapture(media.VideoSockets?.Skip(1).FirstOrDefault(), media.VbssSocket, _logger);
+        _visual = new VisualCapture(media.VideoSockets?.FirstOrDefault(), media.VbssSocket, _logger);
 
         _bridge.AgentSpoke += text =>
         {
@@ -337,14 +337,14 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             ? _chat.PostAsync(thread, markdown, cancellationToken)
             : Task.FromResult(false);
 
-    public async Task<(byte[]? Jpeg, string? From)> CaptureVisualAsync(bool screen, CancellationToken cancellationToken)
+    public async Task<(byte[]? Jpeg, string? From, string? Failure)> CaptureVisualAsync(bool screen, CancellationToken cancellationToken)
     {
         if (_visual is null)
         {
-            return (null, null);
+            return (null, null, "Video isn't available in this call.");
         }
 
-        // Screen: whoever is sharing. Camera: the current speaker if their camera is on, else anyone's.
+        // Screen: whoever is sharing. Camera: the current speaker if their camera is on, then anyone else's.
         Modality wanted = screen ? Modality.VideoBasedScreenSharing : Modality.Video;
         List<(IParticipant P, MediaStream S)> sources = [.. _call.Participants
             .Where(p => p.Resource?.IsInLobby != true && p.Resource?.Info?.Identity?.Application is null)
@@ -353,23 +353,37 @@ public sealed class CallHandler : IMeetingActions, IDisposable
                         x.s.Direction is MediaDirection.SendOnly or MediaDirection.SendReceive &&
                         x.s.SourceId is not null && uint.TryParse(x.s.SourceId, out _))];
 
-        (IParticipant P, MediaStream S) pick = sources.FirstOrDefault(x =>
-            string.Equals(x.P.Resource?.Info?.Identity?.User?.DisplayName, _currentSpeaker, StringComparison.OrdinalIgnoreCase));
-        if (pick.P is null)
-        {
-            pick = sources.FirstOrDefault();
-        }
-
-        if (pick.P is null)
+        if (sources.Count == 0)
         {
             _logger.LogWarning("No {Kind} stream to capture.", screen ? "screen-share" : "camera");
-            return (null, null);
+            return (null, null, screen
+                ? "Nobody is sharing their screen."
+                : "Nobody has their camera on. Ask the person to turn their camera on and hold it up again.");
         }
 
-        string? from = pick.P.Resource?.Info?.Identity?.User?.DisplayName;
-        byte[]? jpeg = await _visual.CaptureAsync(screen, uint.Parse(pick.S.SourceId!), cancellationToken).ConfigureAwait(false);
-        _logger.LogWarning("Captured {Kind} from {From}: {Bytes} bytes.", screen ? "screen" : "camera", from, jpeg?.Length ?? 0);
-        return (jpeg, from);
+        IEnumerable<(IParticipant P, MediaStream S)> ordered = sources
+            .OrderByDescending(x => string.Equals(x.P.Resource?.Info?.Identity?.User?.DisplayName, _currentSpeaker, StringComparison.OrdinalIgnoreCase))
+            .Take(2);
+
+        // The first stream gets the longest wait (keyframe, ramp-up); fallbacks get less so the
+        // whole attempt stays inside the voice tool timeout.
+        TimeSpan wait = TimeSpan.FromSeconds(12);
+        foreach ((IParticipant p, MediaStream s) in ordered)
+        {
+            string? from = p.Resource?.Info?.Identity?.User?.DisplayName;
+            byte[]? jpeg = await _visual.CaptureAsync(screen, uint.Parse(s.SourceId!), wait, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("Capture {Kind} from {From}: {Bytes} bytes.", screen ? "screen" : "camera", from, jpeg?.Length ?? 0);
+            if (jpeg is not null)
+            {
+                return (jpeg, from, null);
+            }
+
+            wait = TimeSpan.FromSeconds(6);
+        }
+
+        return (null, null, screen
+            ? "The screen share sent no picture in time. Ask them to keep sharing and try again."
+            : "The camera sent no picture in time. Ask the person to hold it steady in front of their camera and try again.");
     }
 
     public async Task LeaveAsync(CancellationToken cancellationToken)

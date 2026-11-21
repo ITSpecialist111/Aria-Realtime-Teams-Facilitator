@@ -58,7 +58,7 @@ public sealed class DiagnosticsController : ControllerBase
                     participants = h.Meeting.Participants.Count,
                     restricted = h.Meeting.IsRestricted,
                     noticeGiven = h.NoticeGiven,
-                    video = h.Tile is { } t ? new { active = t.IsActive, framesSent = t.FramesSent, format = t.Format } : null,
+                    video = h.Tile is { } t ? new { active = t.IsActive, framesSent = t.FramesSent, format = t.Format, avgRenderMs = t.AverageRenderMs, maxRenderMs = t.MaxRenderMs } : null,
                     agenda = new { items = agenda.Items.Select(i => i.Title), current = agenda.Current?.Title, minutesIn = Math.Round(agenda.CurrentElapsed.TotalMinutes, 1) },
                     turns = h.Meeting.RecentTurns(600).Count,
                     decisions = notes.Decisions.Count,

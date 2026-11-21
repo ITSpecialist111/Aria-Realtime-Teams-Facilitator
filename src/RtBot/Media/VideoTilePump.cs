@@ -26,6 +26,10 @@ public sealed class VideoTilePump : IAsyncDisposable
     private long _framesSent;
     private byte[]? _lastPng;
     private DateTimeOffset _lastFailureLog = DateTimeOffset.MinValue;
+    private byte[]? _lastFrame;
+    private long _renders;
+    private double _renderMsTotal;
+    private double _renderMsMax;
 
     public VideoTilePump(IVideoSocket socket, Func<TileState> state, ILogger logger)
     {
@@ -45,6 +49,11 @@ public sealed class VideoTilePump : IAsyncDisposable
     public long FramesSent => Interlocked.Read(ref _framesSent);
 
     public string Format => $"{_format.Width}x{_format.Height}";
+
+    /// <summary>Mean GDI+ render plus NV12 conversion time per rendered frame.</summary>
+    public double AverageRenderMs => _renders == 0 ? 0 : Math.Round(_renderMsTotal / _renders, 1);
+
+    public double MaxRenderMs => Math.Round(_renderMsMax, 1);
 
     public void Start()
     {
@@ -87,7 +96,7 @@ public sealed class VideoTilePump : IAsyncDisposable
     private async Task RunAsync(CancellationToken cancellationToken)
     {
         using PeriodicTimer timer = new(FrameInterval);
-        int pngEvery = 0;
+        long tick = 0;
 
         try
         {
@@ -105,11 +114,28 @@ public sealed class VideoTilePump : IAsyncDisposable
                     {
                         _renderer?.Dispose();
                         _renderer = new FacilitatorTileRenderer(format.Width, format.Height);
+                        _lastFrame = null;
                     }
 
-                    byte[] nv12 = _renderer.Render(_state(), (DateTimeOffset.UtcNow - _started).TotalSeconds);
+                    // The content changes slowly and only the orb animates, so render at 7.5 fps
+                    // and resend the previous frame in between: half the CPU, same 15 fps stream.
+                    if (_lastFrame is null || (tick++ & 1) == 0)
+                    {
+                        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                        _lastFrame = _renderer.Render(_state(), (DateTimeOffset.UtcNow - _started).TotalSeconds);
+                        double ms = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                        _renders++;
+                        _renderMsTotal += ms;
+                        _renderMsMax = Math.Max(_renderMsMax, ms);
+
+                        if (_renders % 40 == 0)
+                        {
+                            _lastPng = _renderer.SnapshotPng();
+                        }
+                    }
+
                     UnmanagedVideoSendBuffer buffer = UnmanagedVideoSendBuffer.Create(
-                        nv12, format.Width * format.Height * 3 / 2, format.Width, format, MediaPlatform.GetCurrentTimestamp());
+                        _lastFrame, format.Width * format.Height * 3 / 2, format.Width, format, MediaPlatform.GetCurrentTimestamp());
 
                     try
                     {
@@ -122,11 +148,6 @@ public sealed class VideoTilePump : IAsyncDisposable
                     }
 
                     Interlocked.Increment(ref _framesSent);
-
-                    if (++pngEvery % 75 == 0)
-                    {
-                        _lastPng = _renderer.SnapshotPng();
-                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

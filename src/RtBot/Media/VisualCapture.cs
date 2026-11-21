@@ -15,10 +15,13 @@ namespace RtBot.Media;
 /// </remarks>
 public sealed class VisualCapture : IDisposable
 {
-    private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(8);
-
     // The first frames after subscribing are often a low-quality ramp-up; take a later one.
     private const int FramesToSkip = 4;
+
+    // A stream that has just been subscribed often sends black frames before the first keyframe.
+    // Skip near-black frames for a while, but accept one eventually: the room may just be dark.
+    private const int MaxDarkFramesSkipped = 45;
+    private const double DarkMeanLuma = 22;
 
     private readonly IVideoSocket? _camera;
     private readonly IVideoSocket? _screen;
@@ -49,8 +52,8 @@ public sealed class VisualCapture : IDisposable
 
     public bool HasScreen => _screen is not null;
 
-    /// <summary>One JPEG frame from the given source, or null if nothing arrived in time.</summary>
-    public async Task<byte[]?> CaptureAsync(bool screen, uint mediaSourceId, CancellationToken cancellationToken)
+    /// <summary>One JPEG frame from the given source, or null if nothing arrived within <paramref name="wait"/>.</summary>
+    public async Task<byte[]?> CaptureAsync(bool screen, uint mediaSourceId, TimeSpan wait, CancellationToken cancellationToken)
     {
         IVideoSocket? socket = screen ? _screen : _camera;
         if (socket is null)
@@ -67,7 +70,7 @@ public sealed class VisualCapture : IDisposable
             socket.Subscribe(screen ? VideoResolution.HD1080p : VideoResolution.HD720p, mediaSourceId);
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(FrameTimeout);
+            timeout.CancelAfter(wait);
             using (timeout.Token.Register(() => tcs.TrySetResult(null)))
             {
                 return await tcs.Task.ConfigureAwait(false);
@@ -94,7 +97,8 @@ public sealed class VisualCapture : IDisposable
         try
         {
             TaskCompletionSource<byte[]?>? pending = Volatile.Read(ref _pending);
-            if (pending is null || pending.Task.IsCompleted || Interlocked.Increment(ref _framesSeen) <= FramesToSkip)
+            int seen = pending is null ? 0 : Interlocked.Increment(ref _framesSeen);
+            if (pending is null || pending.Task.IsCompleted || seen <= FramesToSkip)
             {
                 return;
             }
@@ -104,6 +108,12 @@ public sealed class VisualCapture : IDisposable
             int height = buffer.VideoFormat.Height;
             int stride = buffer.Stride > 0 ? (int)buffer.Stride : width;
             if (width <= 0 || height <= 0 || buffer.Data == IntPtr.Zero || buffer.Length < (long)stride * height * 3 / 2)
+            {
+                return;
+            }
+
+            // Judge brightness in place: copying every dark ramp-up frame would churn megabytes.
+            if (seen <= FramesToSkip + MaxDarkFramesSkipped && MeanLuma(buffer.Data, width, height, stride) < DarkMeanLuma)
             {
                 return;
             }
@@ -136,6 +146,25 @@ public sealed class VisualCapture : IDisposable
         {
             e.Buffer.Dispose();
         }
+    }
+
+    /// <summary>Average brightness of the Y plane, sampled sparsely: cheap enough for the media thread.</summary>
+    private static unsafe double MeanLuma(IntPtr data, int width, int height, int stride)
+    {
+        byte* y = (byte*)data;
+        long sum = 0;
+        int count = 0;
+        for (int row = 0; row < height; row += 8)
+        {
+            int offset = row * stride;
+            for (int col = 0; col < width; col += 8)
+            {
+                sum += y[offset + col];
+                count++;
+            }
+        }
+
+        return count == 0 ? 0 : (double)sum / count;
     }
 
     /// <summary>NV12 (BT.601 limited range) to a JPEG, scaled down to at most 1600 px wide.</summary>

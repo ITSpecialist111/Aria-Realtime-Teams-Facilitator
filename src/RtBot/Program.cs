@@ -115,7 +115,30 @@ builder.Services.AddSingleton<ITokenStore>(sp =>
         : new ProtectedFileTokenStore(path, sp.GetRequiredService<ILogger<ProtectedFileTokenStore>>());
 });
 
-builder.Services.AddSingleton<IDelegatedTokenProvider, DelegatedTokenProvider>();
+builder.Services.AddSingleton<DelegatedTokenProvider>();
+builder.Services.AddSingleton<IDelegatedTokenProvider>(sp =>
+{
+    DelegatedTokenProvider serviceAccount = sp.GetRequiredService<DelegatedTokenProvider>();
+    AgentIdentityOptions agent = options.AgentIdentity;
+    if (!agent.Enabled ||
+        string.IsNullOrWhiteSpace(agent.BlueprintId) ||
+        string.IsNullOrWhiteSpace(agent.AgentIdentityId) ||
+        string.IsNullOrWhiteSpace(agent.AgentUserId))
+    {
+        return serviceAccount;
+    }
+
+    // The AI teammate acts as itself; the service account is only the fallback.
+    return new AgentUserTokenProvider(
+        agent,
+        options.AzureAd.TenantId,
+        sp.GetRequiredService<TokenCredential>(),
+        serviceAccount,
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetRequiredService<ILogger<AgentUserTokenProvider>>());
+});
+builder.Services.AddSingleton(options.AgentIdentity);
+builder.Services.AddHostedService<CalendarAutoJoinService>();
 builder.Services.AddSingleton(options.Facilitator);
 builder.Services.AddSingleton<BotChatClient>();
 builder.Services.AddSingleton<MeetingDetailsLookup>();

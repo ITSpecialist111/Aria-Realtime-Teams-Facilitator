@@ -4,12 +4,21 @@
 
 > **Independent open-source project.** This is not a Microsoft product. It is not affiliated with, endorsed by, sponsored by or supported by Microsoft Corporation. See the [Disclaimer](#disclaimer).
 
-Aria joins a Teams meeting as a participant, listens to the whole conversation, and answers **out loud** when someone says her name. While the meeting runs she keeps notes, decisions and action items. She can look up Microsoft 365 work data through **Work IQ**, answer @mentions in the meeting chat, and give time checks. When the meeting ends she posts a recap to the chat and **emails attendees a summary, insights and an actions table**. Activity is exported as OpenTelemetry to **Microsoft Agent 365**.
+Aria joins a Teams meeting as a participant, listens to the whole conversation, and answers **out loud** when someone says her name. She has her own **live video tile** showing her state, the meeting clock and the agenda timebox. She arrives with the **agenda read from the invite** and keeps time against it. Domain **skills** (for example construction, project delivery or agile) tell her what to listen for and what a good meeting must cover. She keeps notes, decisions, action items and a parking lot, looks up Microsoft 365 work data through **Work IQ**, and answers @mentions in the meeting chat. When the meeting ends she posts a recap and **emails attendees a summary, insights and an actions table**. Activity is exported as OpenTelemetry to **Microsoft Agent 365**.
 
 > Status: working proof of concept. It runs end to end against a real tenant. See [Limitations](#limitations) before relying on it.
 
 ## Demo
 
+**Aria's video tile.** Rendered by the bot and streamed into the meeting at 15 fps. The orb shows ready, listening, thinking or speaking. The panel shows the meeting clock, the current agenda item with its timebox, the next item, any running timer, and tallies of decisions, actions and parked topics. Her last spoken line appears as a caption.
+
+![Aria's facilitator tile: speaking state, construction and project-delivery skills active, agenda item 2 of 4 with 1:30 left, a running timer, and a caption of her last answer](docs/media/tile-sample.png)
+
+*Sample render from the same code that streams into the call (sample data). The same view turns red when an item overruns, and shows a banner when an external guest is present:*
+
+<img src="docs/media/tile-overrun.png" alt="Tile showing an overrunning agenda item, meeting over time, and the external-guest banner" width="480">
+
+**Early voice demo.**
 [![Aria in a Teams meeting. Click to play the demo video with audio.](docs/media/aria-in-meeting.png)](docs/media/aria-demo.mp4)
 
 *57-second unedited clip from a live Teams meeting (click the image to play, with audio). The bot's resource name is masked.*
@@ -31,6 +40,7 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 
 - [Demo](#demo)
 - [What it does](#what-it-does)
+- [Skills: making Aria a specialist](#skills-making-aria-a-specialist)
 - [How it compares](#how-it-compares)
 - [Architecture](#architecture)
   - [Topology](#topology)
@@ -61,13 +71,57 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Answers only when addressed** | Continuous transcription. A reply starts only when the agent's name is said as a whole word. The same speaker can ask a follow-up within 10 s without repeating the name. |
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
 | **Meeting memory** | A text model folds the conversation into running notes every 45 s: summary, decisions, action items and open questions. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
-| **Facilitator tools** | `record_action_item`, `record_decision`, `get_meeting_status`, `set_timer`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
+| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
+| **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
+| **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
 | **Work IQ** | Mail, calendar, files, chats and people lookups through the Work IQ MCP server, run as a delegated service account. |
 | **Meeting chat** | Posts a join notice and the recap through Bot Framework proactive messaging. Answers @mentions with the same tools and notes as the voice path. |
-| **Time-keeping** | Speaks a time check at halfway and a few minutes before the scheduled end, read from the meeting's schedule in Graph. |
+| **Time-keeping** | Keeps each agenda item to its timebox and, when one overruns, asks whether to move on, extend or park it. Gives a halfway check and a wrap-up warning that lists anything the active skills say hasn't been covered. |
 | **External-guest policy** | When a guest, phone dial-in, anonymous user or other-tenant user joins, Aria announces it and **withdraws organisation-data tools**. The alternative policy setting makes her leave. |
 | **End-of-meeting report** | Posts a recap to the chat and emails internal attendees a summary, key insights, decisions, actions (owner and due date), open questions, next steps and share of speaking time. |
 | **Self-management** | Leaves when alone for 60 s, rebuilds the voice session if it drops (re-seeding it with the notes), and leaves if it cannot recover. |
+
+## Skills: making Aria a specialist
+
+One codebase, many specialists. Each deployment has a **profile** that sets Aria's purpose. Each meeting gets the **skills** that fit it, chosen automatically from the subject and agenda, or switched on by voice ("Aria, treat this as an incident review").
+
+A skill is a `SKILL.md` file, in the same shape as Agent 365, Claude and VS Code skills:
+
+```markdown
+---
+name: construction-project
+description: Construction project and site meetings - progress, programme, design, commercial and safety
+triggers: [construction, site, RFI, variation, NEC, JCT, snagging]
+track: [RFIs, Variations and change, Early warnings, Health and safety, Programme and critical path]
+checklist:
+  - Health and safety first (incidents, near misses, RAMS)
+  - Programme progress against baseline
+  - Outstanding RFIs and design information
+---
+Guidance in plain English: run order, what to probe, what never to say...
+```
+
+| Field | What it drives |
+| --- | --- |
+| `triggers` | Selection. A text model matches the meeting's subject and agenda against each skill's description and triggers. Keyword matching is the fallback. |
+| `track` | Categories Aria listens for and records with `track_item`, and that the scribe extracts from the transcript. Each becomes its own section in the recap and email. |
+| `checklist` | What a good meeting of this kind covers. Items are ticked off live (`mark_covered`). Anything uncovered is raised in the wrap-up warning and listed in the recap as "Not covered this time". |
+| body | Behaviour guidance appended to the voice and chat instructions, for example "open with safety" or "never state a contractual position as fact". |
+
+**Built-in skills:** `construction-project`, `project-delivery` (RAID and governance), `agile-sprint`, `client-sales` (MEDDICC), `incident-review` (blameless post-incident review).
+
+**Profiles** (`profiles/<name>.md`) set the purpose and the skills that are always on for a deployment:
+
+```markdown
+---
+name: construction-pm
+purpose: Facilitator for a construction project team, supporting the project manager...
+skills: [construction-project, project-delivery]
+---
+The project manager chairs; you keep time and the record...
+```
+
+Set `Facilitator:Profile` to choose one. Custom skills and profiles go in `Facilitator:CustomSkillsPath` (default `C:\rtbot\skills`), outside the app folder, so redeploys keep them. A custom skill with the same name replaces a built-in one. Files are read at each join, so edits apply from the next meeting with no restart.
 
 ## How it compares
 
@@ -217,6 +271,10 @@ sequenceDiagram
 | `Teams/MeetingDetailsLookup.cs` | Meeting subject and schedule from Graph `onlineMeetings`. |
 | `Voice/VoiceLiveBridge.cs` | The Voice Live session. Configuration, reconnect with notes re-seeding, name and follow-up gating, per-response briefing, barge-in truncation, tool dispatch. |
 | `Media/OutboundAudioPacer.cs` | Owns the playback clock: one 640-byte frame every 20 ms, three frames of lookahead, click-free flush, true played duration for truncation. |
+| `Media/FacilitatorTileRenderer.cs` | Draws the video tile with GDI+ and converts it to NV12 (BT.601). |
+| `Media/VideoTilePump.cs` | Streams the tile at 15 fps in the format Teams prefers, only while the video is being viewed. |
+| `Facilitator/MeetingAgendaLoader.cs` | Finds the meeting in the agent account's calendar and extracts the agenda and timeboxes from the invite. |
+| `Facilitator/SkillLibrary.cs`, `MeetingSkill.cs` | Loads profiles and `SKILL.md` files (built-in and custom), selects skills per meeting, and renders them into instructions. |
 | `Facilitator/MeetingContext.cs` | The meeting's durable state: transcript turns, participants and attendees, talk time, notes, briefing renderer. |
 | `Facilitator/MeetingScribe.cs` | Rolling notes every 45 s, and the final report with insights. |
 | `Facilitator/MeetingToolset.cs` | Local facilitator tools plus the MCP catalogue, with restricted-mode filtering **and** enforcement at dispatch. |
@@ -305,6 +363,8 @@ The full decision record is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In 
 | `WorkIQAgent.Ask` | Work IQ MCP. |
 | `Mail.Send` | Recap email, sent from the service account. |
 | `User.ReadBasic.All` | Resolve attendees to email addresses. |
+| `Calendars.Read` | Read the meeting invite to pick up the agenda. |
+| `Calendars.ReadWrite` | Optional. For creating test meetings, and later for booking follow-ups. |
 
 **Teams app RSC permissions:** `Calls.JoinGroupCalls.Chat`, `Calls.AccessMedia.Chat`, `OnlineMeetingParticipant.Read.Chat`, `ChatMessage.Read.Chat`, `ChatMessage.Send.Chat`.
 
@@ -420,6 +480,8 @@ All settings are under `RtBot` in [`appsettings.json`](src/RtBot/appsettings.jso
 | `Facilitator:EmailRecapOnEnd` | `true` | Email report to internal attendees. |
 | `Facilitator:MinTurnsForEmail` | `3` | Skip email for empty or test calls. |
 | `Facilitator:LeaveWhenAloneSeconds` | `60` | Auto-leave. |
+| `Facilitator:Profile` | `default` | Instance profile (`profiles/<name>.md`). Plain name only. |
+| `Facilitator:CustomSkillsPath` | `C:\rtbot\skills` | Custom skills and profiles; overrides built-ins by name. |
 | `Observability:EnableAgent365` | `false` | Agent 365 export. |
 | `Observability:ApplicationInsightsConnectionString` | | Optional second sink. |
 
@@ -442,6 +504,10 @@ In a meeting:
 - *"Aria, note that Sam will send the deck by Friday."* (action item)
 - *"Aria, how long have we got?"*
 - *"Aria, set a five-minute timer."*
+- *"Aria, our agenda is status for ten minutes, budget for five, then risks."*
+- *"Aria, let's move on."* / *"Aria, give us two more minutes."* / *"Aria, park that."*
+- *"Aria, log an RFI: Sam needs the revised steel details by Thursday."* (with the construction skill)
+- *"Aria, what haven't we covered?"*
 - `@Aria` in the meeting chat for a written answer.
 
 ---
@@ -459,6 +525,7 @@ src/RtBot/                 the service
   Teams/                   calling service, call handler, meeting lookup, join URL parser
   Tools/                   MCP catalogue, delegated tokens, token stores
   Voice/                   Voice Live bridge
+  skills/                  built-in SKILL.md files and profiles/
 tools/RtBot.Verify/        CLI checks for Voice Live, transcription pairings and Work IQ
 infra/main.bicep           Azure infrastructure
 scripts/                   host setup, deploy, Work IQ sign-in, operator CLI

@@ -120,6 +120,8 @@ builder.Services.AddSingleton(options.Facilitator);
 builder.Services.AddSingleton<BotChatClient>();
 builder.Services.AddSingleton<MeetingDetailsLookup>();
 builder.Services.AddSingleton<MeetingMailer>();
+builder.Services.AddSingleton<MeetingAgendaLoader>();
+builder.Services.AddSingleton<SkillLibrary>();
 builder.Services.AddSingleton(sp => new TextModelClient(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(TextModelClient)),
     sp.GetRequiredService<TokenCredential>(),

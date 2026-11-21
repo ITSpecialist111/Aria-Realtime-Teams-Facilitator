@@ -225,6 +225,12 @@ public sealed class FacilitatorOptions
 
     /// <summary>Read the shared screen when asked. Uses the scribe model's vision.</summary>
     public bool EnableScreenVision { get; set; } = true;
+
+    /// <summary>Instance profile name: <c>profiles/&lt;name&gt;.md</c> in the custom or built-in skills folder.</summary>
+    public string Profile { get; set; } = "default";
+
+    /// <summary>Custom skills and profiles, outside the app folder so redeploys keep them.</summary>
+    public string CustomSkillsPath { get; set; } = @"C:\rtbot\skills";
 }
 
 public sealed class ObservabilityOptions

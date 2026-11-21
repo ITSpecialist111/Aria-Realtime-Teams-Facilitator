@@ -154,6 +154,13 @@ public sealed class MeetingMailer
         }
 
         List(h, "Open questions", report.OpenQuestions);
+        List(h, "Parking lot", meeting.ParkingLot);
+        foreach ((string category, IReadOnlyList<string> items) in meeting.Tracked)
+        {
+            List(h, category, items);
+        }
+
+        List(h, "Not covered this time", meeting.UncoveredChecklist);
         Section(h, "Next steps", report.NextSteps);
 
         if (report.TalkTime.Count > 1)

@@ -71,6 +71,13 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     // A lost response.done (dropped socket, server error) must not silence the agent for the rest of the call.
     private bool IsResponding => _responseActive && DateTimeOffset.UtcNow - _responseStartedAt < TimeSpan.FromSeconds(45);
 
+    /// <summary>What the agent appears to be doing, for its video tile.</summary>
+    public AgentPresence Presence =>
+        IsAgentSpeaking ? AgentPresence.Speaking
+        : Volatile.Read(ref _toolsInFlight) > 0 || IsResponding ? AgentPresence.Thinking
+        : _someoneSpeaking ? AgentPresence.Listening
+        : AgentPresence.Ready;
+
     /// <summary>Connects the bridge to the meeting it serves. Must be called before <see cref="StartAsync"/>.</summary>
     public void Attach(MeetingContext meeting, MeetingToolset tools, Func<string> currentSpeaker)
     {
@@ -285,7 +292,8 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
         VoiceLiveSessionOptions options = new()
         {
             Model = _options.Model,
-            Instructions = string.IsNullOrWhiteSpace(_options.Instructions) ? DefaultInstructions() : _options.Instructions,
+            Instructions = (string.IsNullOrWhiteSpace(_options.Instructions) ? DefaultInstructions() : _options.Instructions) +
+                (_meeting is null ? string.Empty : SkillLibrary.RenderInstructions(_meeting.Profile, _meeting.ActiveSkills)),
 
             InputAudioFormat = InputAudioFormat.Pcm16,
             InputAudioSamplingRate = AudioConstants.SampleRate,
@@ -353,6 +361,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
          - Use people's names. Do not narrate what you are about to do; do it and report the result.
 
          What you do as facilitator:
+         - Keep time. When someone states an agenda or asks you to run one, call set_agenda (with timeboxes if given).
+           Move on with next_agenda_item when the group moves on; give more time with extend_agenda_item.
+           When a topic drifts off-agenda, offer to park it and call park_topic.
          - Track the meeting: when someone takes on a task, call record_action_item and confirm it in a few words.
            When the group agrees something, call record_decision.
          - Questions about the meeting itself (who said what, what was agreed, time left) are answered from get_meeting_status.
@@ -624,7 +635,6 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
             try
             {
                 await session.AddItemAsync(new FunctionCallOutputItem(call.CallId, output), cancellationToken).ConfigureAwait(false);
-                Interlocked.Increment(ref _pendingToolOutputs);
             }
             catch (Exception ex)
             {
@@ -632,6 +642,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
             }
             finally
             {
+                // Counted even when delivery failed, so the model is still asked to carry on.
+                Interlocked.Increment(ref _pendingToolOutputs);
+
                 // Whichever finishes last, this or response.done, asks for the follow-up response.
                 if (Interlocked.Decrement(ref _toolsInFlight) == 0 && !_responseActive)
                 {

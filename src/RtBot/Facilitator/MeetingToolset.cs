@@ -23,6 +23,7 @@ public sealed class MeetingToolset
     private readonly string _visionModel;
     private readonly bool _visionEnabled;
     private readonly string _agentName;
+    private readonly IReadOnlyList<MeetingSkill> _availableSkills;
     private readonly ILogger _logger;
     private readonly Dictionary<string, LocalTool> _local = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Timer> _timers = [];
@@ -35,6 +36,7 @@ public sealed class MeetingToolset
         string visionModel,
         bool visionEnabled,
         string agentName,
+        IReadOnlyList<MeetingSkill> availableSkills,
         ILogger logger)
     {
         _catalog = catalog;
@@ -44,6 +46,7 @@ public sealed class MeetingToolset
         _visionModel = visionModel;
         _visionEnabled = visionEnabled;
         _agentName = agentName;
+        _availableSkills = availableSkills;
         _logger = logger;
 
         Register();
@@ -181,8 +184,145 @@ public sealed class MeetingToolset
                     _timers.Add(timer);
                 }
 
+                _meeting.AddTimer(new MeetingTimer(label, DateTimeOffset.UtcNow.AddMinutes(minutes)));
                 return Task.FromResult(Ok($"Timer set for {minutes:0.#} minutes."));
             });
+
+        Add(
+            "set_agenda",
+            "Set or replace the meeting agenda when someone states it or asks you to run one, optionally with a timebox per item. Starts the first item. Confirm it back in one short sentence.",
+            """
+            {"type":"object","properties":{
+              "items":{"type":"array","minItems":1,"items":{"type":"object","properties":{
+                "title":{"type":"string"},
+                "minutes":{"type":"number","minimum":0.5,"maximum":240,"description":"Timebox, if one was given"}},
+               "required":["title"]}}},
+             "required":["items"]}
+            """,
+            (args, _) =>
+            {
+                List<AgendaItem> items = [];
+                if (args.TryGetProperty("items", out JsonElement list) && list.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement item in list.EnumerateArray())
+                    {
+                        string title = Str(item, "title");
+                        double? minutes = item.TryGetProperty("minutes", out JsonElement m) && m.TryGetDouble(out double d) ? d : null;
+                        if (title.Length > 0)
+                        {
+                            items.Add(new AgendaItem(title, minutes));
+                        }
+                    }
+                }
+
+                if (items.Count == 0)
+                {
+                    return Task.FromResult(Error("No agenda items were given."));
+                }
+
+                _meeting.SetAgenda(items);
+                return Task.FromResult(Ok($"Agenda set with {items.Count} items. Now on: {items[0].Title}."));
+            });
+
+        Add(
+            "next_agenda_item",
+            "Close the current agenda item and move to the next. Use when the group moves on or asks to.",
+            """{"type":"object","properties":{}}""",
+            (_, _) =>
+            {
+                AgendaItem? next = _meeting.AdvanceAgenda();
+                return Task.FromResult(next is null
+                    ? Ok("That was the last agenda item. Offer to recap or wrap up.")
+                    : Ok($"Now on: {next.Title}{(next.Minutes is { } m ? $", {m:0.#} minutes" : string.Empty)}."));
+            });
+
+        Add(
+            "extend_agenda_item",
+            "Give the current agenda item more time when the group agrees to keep going.",
+            """{"type":"object","properties":{"minutes":{"type":"number","minimum":0.5,"maximum":60}},"required":["minutes"]}""",
+            (args, _) =>
+            {
+                double minutes = args.TryGetProperty("minutes", out JsonElement m) && m.TryGetDouble(out double d) ? d : 5;
+                AgendaItem? item = _meeting.ExtendCurrentItem(minutes);
+                return Task.FromResult(item is null ? Error("There is no agenda item in progress.") : Ok($"Added {minutes:0.#} minutes to {item.Title}."));
+            });
+
+        Add(
+            "park_topic",
+            "Put a topic in the parking lot when it is off-agenda or needs a separate conversation. Parked topics go into the recap.",
+            """{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}""",
+            (args, _) =>
+            {
+                _meeting.ParkTopic(Str(args, "topic"));
+                return Task.FromResult(Ok("Parked."));
+            });
+
+        Add(
+            "track_item",
+            "Record something your active specialist skills say to listen for (for example an RFI, a variation, a risk or a safety issue) under one of their categories. Confirm briefly.",
+            """
+            {"type":"object","properties":{
+              "category":{"type":"string","description":"One of the categories your active skills list"},
+              "item":{"type":"string","description":"The specific item, with owner or reference if stated"}},
+             "required":["category","item"]}
+            """,
+            (args, _) =>
+            {
+                string category = Str(args, "category");
+                string item = Str(args, "item");
+                if (category.Length == 0 || item.Length == 0)
+                {
+                    return Task.FromResult(Error("Both a category and an item are needed."));
+                }
+
+                _meeting.AddTracked(category, item);
+                return Task.FromResult(Ok($"Tracked under {category}."));
+            });
+
+        Add(
+            "mark_covered",
+            "Mark an item from your skills' coverage checklist as dealt with in this meeting.",
+            """{"type":"object","properties":{"item":{"type":"string","description":"The checklist item, as worded in your instructions"}},"required":["item"]}""",
+            (args, _) =>
+            {
+                string wanted = Str(args, "item");
+                string? match = _meeting.ActiveSkills.SelectMany(s => s.Checklist)
+                    .FirstOrDefault(c => c.Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                    ?? _meeting.ActiveSkills.SelectMany(s => s.Checklist)
+                        .FirstOrDefault(c => c.Contains(wanted, StringComparison.OrdinalIgnoreCase) || wanted.Contains(c, StringComparison.OrdinalIgnoreCase));
+                if (match is null)
+                {
+                    return Task.FromResult(Error("That isn't on the checklist."));
+                }
+
+                _meeting.MarkCovered(match);
+                return Task.FromResult(Ok($"Marked covered: {match}. {_meeting.UncoveredChecklist.Count} left."));
+            });
+
+        if (_availableSkills.Count > 0)
+        {
+            Add(
+                "activate_skill",
+                "Switch on a specialist skill when the meeting turns out to be about that domain, or someone asks. Available: " +
+                string.Join("; ", _availableSkills.Select(s => $"{s.Name} ({s.Description})")),
+                """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}""",
+                async (args, ct) =>
+                {
+                    string name = Str(args, "name");
+                    MeetingSkill? skill = _availableSkills.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (skill is null)
+                    {
+                        return Error($"No skill called '{name}'.");
+                    }
+
+                    if (_meeting.ActivateSkill(skill))
+                    {
+                        await _actions.SkillsChangedAsync(ct).ConfigureAwait(false);
+                    }
+
+                    return Ok($"{skill.Name} is active. Its guidance applies from your next reply.");
+                });
+        }
 
         Add(
             "post_to_meeting_chat",

@@ -31,6 +31,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private readonly BotChatClient _chat;
     private readonly MeetingDetailsLookup _details;
     private readonly MeetingMailer _mailer;
+    private readonly MeetingAgendaLoader _agendaLoader;
+    private readonly SkillLibrary _skills;
+    private readonly IReadOnlyList<MeetingSkill> _availableSkills;
     private readonly MeetingScribe _scribe;
     private readonly RtBotOptions _options;
     private readonly FacilitatorOptions _facilitator;
@@ -42,6 +45,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private readonly string? _joinUrl;
 
     private OutboundAudioPacer? _pacer;
+    private VideoTilePump? _tile;
+    private string? _caption;
+    private DateTimeOffset? _captionAt;
     private Task? _inboundPump;
     private Task? _facilitatorLoop;
     private IAudioSocket? _audioSocket;
@@ -63,6 +69,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         BotChatClient chat,
         MeetingDetailsLookup details,
         MeetingMailer mailer,
+        MeetingAgendaLoader agendaLoader,
+        SkillLibrary skills,
         RtBotOptions options,
         string? joinUrl,
         ILogger logger)
@@ -72,12 +80,18 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         _chat = chat;
         _details = details;
         _mailer = mailer;
+        _agendaLoader = agendaLoader;
+        _skills = skills;
         _options = options;
         _facilitator = options.Facilitator;
         _joinUrl = joinUrl;
         _logger = logger;
 
-        Meeting = new MeetingContext(call.Id, call.Resource?.ChatInfo?.ThreadId, options.AzureAd.TenantId);
+        Meeting = new MeetingContext(call.Id, call.Resource?.ChatInfo?.ThreadId, options.AzureAd.TenantId)
+        {
+            Profile = skills.LoadProfile(),
+        };
+        _availableSkills = skills.LoadSkills();
         Tools = new MeetingToolset(
             catalog,
             Meeting,
@@ -86,6 +100,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             _facilitator.ScribeModel,
             _facilitator.EnableScreenVision,
             options.Voice.AgentName,
+            _availableSkills,
             logger);
         _scribe = new MeetingScribe(textModel, _facilitator.ScribeModel, logger);
 
@@ -111,6 +126,35 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     public MeetingToolset Tools { get; }
 
+    /// <summary>The live video tile, when the call has a video socket.</summary>
+    public VideoTilePump? Tile => _tile;
+
+    /// <summary>Whether the agent's spoken greeting and chat notice have gone out.</summary>
+    public bool NoticeGiven => _noticeGiven;
+
+    private TileState BuildTileState()
+    {
+        MeetingNotes notes = Meeting.SnapshotNotes();
+        TimeSpan? length = Meeting.ScheduledStart is { } s && Meeting.ScheduledEnd is { } e && e > s ? e - s : null;
+        return new TileState(
+            _options.Voice.AgentName,
+            _bridge.Presence,
+            Meeting.Subject,
+            Meeting.Elapsed,
+            Meeting.Remaining,
+            length,
+            Meeting.SnapshotAgenda(),
+            Meeting.ActiveTimer,
+            notes.Decisions.Count,
+            notes.Actions.Count,
+            Meeting.ParkingLot.Count,
+            Meeting.Participants.Count,
+            Meeting.IsRestricted,
+            _caption,
+            _captionAt,
+            Meeting.SpecialismLabel);
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _audioSocket = _call.GetLocalMediaSession().AudioSocket
@@ -119,6 +163,19 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         _pacer = new OutboundAudioPacer(_audioSocket, _logger);
         _pacer.Start();
 
+        if (_call.GetLocalMediaSession().VideoSockets?.FirstOrDefault() is { } videoSocket)
+        {
+            _tile = new VideoTilePump(videoSocket, BuildTileState, _logger);
+            _tile.Start();
+        }
+
+        _bridge.AgentSpoke += text =>
+        {
+            _caption = text;
+            _captionAt = DateTimeOffset.UtcNow;
+            return Task.CompletedTask;
+        };
+
         // The roster may already be populated by the time the handler exists.
         foreach (IParticipant participant in _call.Participants)
         {
@@ -126,6 +183,29 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         }
 
         await LoadMeetingDetailsAsync(cancellationToken).ConfigureAwait(false);
+
+        if (Meeting.ThreadId is { } thread)
+        {
+            IReadOnlyList<AgendaItem> agenda = await _agendaLoader
+                .LoadAsync(thread, _joinUrl, _facilitator.ScribeModel, cancellationToken).ConfigureAwait(false);
+            if (agenda.Count > 0)
+            {
+                Meeting.SetAgenda(agenda);
+            }
+        }
+
+        IReadOnlyList<MeetingSkill> chosen = await _skills.SelectAsync(
+            _availableSkills, Meeting.Profile, Meeting.Subject, Meeting.SnapshotAgenda().Items, cancellationToken).ConfigureAwait(false);
+        foreach (MeetingSkill skill in chosen)
+        {
+            Meeting.ActivateSkill(skill);
+        }
+
+        _logger.LogWarning(
+            "Profile {Profile}; skills available {Available}; active {Active}.",
+            Meeting.Profile.Name,
+            _availableSkills.Count,
+            string.Join(", ", chosen.Select(s => s.Name)));
 
         await _bridge.StartAsync(_pacer, cancellationToken).ConfigureAwait(false);
 
@@ -152,6 +232,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     public Task SpeakAsync(string instruction, CancellationToken cancellationToken) =>
         _bridge.AnnounceAsync(instruction, cancellationToken);
+
+    public Task SkillsChangedAsync(CancellationToken cancellationToken) =>
+        _bridge.RefreshSessionAsync(cancellationToken);
 
     public Task<bool> PostToChatAsync(string markdown, CancellationToken cancellationToken) =>
         Meeting.ThreadId is { } thread
@@ -218,7 +301,10 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             cancellationToken).ConfigureAwait(false);
 
         await _bridge.AnnounceAsync(
-            $"Introduce yourself in one sentence as {name}, the AI facilitator. Say you're taking notes, and people can ask you anything by saying your name.",
+            $"Introduce yourself in one sentence as {name}, the AI facilitator. Say you're taking notes, and people can ask you anything by saying your name." +
+            (Meeting.SnapshotAgenda().Current is { } first
+                ? $" Then say you have the agenda from the invite, {Meeting.SnapshotAgenda().Items.Count} items, starting with '{first.Title}', and you'll keep time."
+                : string.Empty),
             cancellationToken).ConfigureAwait(false);
 
         _noticeGiven = true;
@@ -259,6 +345,15 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             await _scribe.UpdateAsync(Meeting, cancellationToken).ConfigureAwait(false);
         }
 
+        if (_facilitator.ProactiveTimeChecks && Meeting.TryClaimOverrun(out AgendaItem? overrun) && overrun is not null)
+        {
+            AgendaItem? next = Meeting.SnapshotAgenda().Next;
+            string ask = next is null
+                ? "and ask whether to wrap it up or take a couple more minutes."
+                : $"and ask whether to move on to '{next.Title}', take a couple more minutes, or park the rest.";
+            await _bridge.AnnounceAsync($"Politely say the timebox for '{overrun.Title}' is up, {ask}", cancellationToken).ConfigureAwait(false);
+        }
+
         if (_facilitator.ProactiveTimeChecks && Meeting.ScheduledStart is { } start && Meeting.ScheduledEnd is { } end && end > start)
         {
             TimeSpan length = end - start;
@@ -275,9 +370,12 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             {
                 _wrapUpAnnounced = true;
                 int open = Meeting.SnapshotNotes().OpenQuestions.Count;
+                IReadOnlyList<string> uncovered = Meeting.UncoveredChecklist;
                 await _bridge.AnnounceAsync(
                     $"Give a brief heads-up that about {(int)Math.Ceiling((end - now).TotalMinutes)} minutes remain" +
-                    (open > 0 ? $" and there are {open} open questions to settle or take offline." : "."),
+                    (open > 0 ? $", there are {open} open questions" : string.Empty) +
+                    (uncovered.Count > 0 ? $", and these haven't been covered yet: {string.Join("; ", uncovered.Take(3))}" : string.Empty) +
+                    ".",
                     cancellationToken).ConfigureAwait(false);
             }
         }
@@ -650,6 +748,11 @@ public sealed class CallHandler : IMeetingActions, IDisposable
                 if (_facilitatorLoop is not null)
                 {
                     await _facilitatorLoop.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                }
+
+                if (_tile is not null)
+                {
+                    await _tile.DisposeAsync().ConfigureAwait(false);
                 }
 
                 if (_pacer is not null)

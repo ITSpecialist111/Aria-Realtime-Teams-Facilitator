@@ -14,6 +14,8 @@
     <RootNamespace>RtBot</RootNamespace>
     <UserSecretsId>rtbot-teams-realtime-voice</UserSecretsId>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- NV12 conversion of the video tile walks bitmap memory directly. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup Label="Teams real-time media">
@@ -45,6 +47,13 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <!-- GDI+ renders the facilitator video tile; the host is Windows-only anyway. -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Built-in skills and profiles">
+    <None Include="skills\**\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

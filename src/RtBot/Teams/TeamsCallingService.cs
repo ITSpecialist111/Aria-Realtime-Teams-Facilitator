@@ -11,6 +11,7 @@ using Microsoft.Skype.Bots.Media;
 using RtBot.Chat;
 using RtBot.Configuration;
 using RtBot.Facilitator;
+using RtBot.Media;
 using RtBot.Tools;
 using RtBot.Voice;
 
@@ -50,6 +51,8 @@ public sealed class TeamsCallingService : IAsyncDisposable
         _handlers.TryGetValue(callId, out handler);
 
     /// <summary>The live call whose meeting chat is <paramref name="threadId"/>, if the agent is in it.</summary>
+    public IReadOnlyCollection<CallHandler> ActiveHandlers => [.. _handlers.Values];
+
     public CallHandler? FindByThread(string threadId) =>
         _handlers.Values.FirstOrDefault(h => string.Equals(h.Meeting.ThreadId, threadId, StringComparison.OrdinalIgnoreCase));
 
@@ -135,7 +138,10 @@ public sealed class TeamsCallingService : IAsyncDisposable
             },
             new VideoSocketSettings
             {
-                StreamDirections = StreamDirection.Inactive,
+                // Aria's tile: a rendered facilitator view instead of the default bot placeholder.
+                StreamDirections = StreamDirection.Sendonly,
+                SupportedSendVideoFormats = VideoTilePump.SupportedFormats,
+                MaxConcurrentSendStreams = 1,
             },
             mediaSessionId: mediaSessionId);
 
@@ -197,6 +203,8 @@ public sealed class TeamsCallingService : IAsyncDisposable
                 _services.GetRequiredService<BotChatClient>(),
                 _services.GetRequiredService<MeetingDetailsLookup>(),
                 _services.GetRequiredService<MeetingMailer>(),
+                _services.GetRequiredService<MeetingAgendaLoader>(),
+                _services.GetRequiredService<SkillLibrary>(),
                 _options,
                 joinUrl,
                 _services.GetRequiredService<ILoggerFactory>().CreateLogger($"Call:{call.Id}"));

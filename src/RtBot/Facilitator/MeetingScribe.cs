@@ -21,7 +21,9 @@ public sealed class MeetingScribe
           "summary": "3-6 sentences on what has been discussed so far, most recent topic last",
           "decisions": ["each decision that was actually agreed, phrased as a statement"],
           "actions": [{"owner": "person's name as spoken", "task": "what they will do", "due": "date/time if stated, else null"}],
-          "open_questions": ["questions raised and not yet answered"]
+          "open_questions": ["questions raised and not yet answered"],
+          "tracked": {"<category>": ["item"]},
+          "covered": ["checklist items that were dealt with in these lines"]
         }
 
         Rules:
@@ -29,6 +31,8 @@ public sealed class MeetingScribe
         - Only record an action if a specific person took it on or was assigned it. Use their name as it
           appears in the transcript. Never invent owners or dates.
         - Keep previous decisions and actions unless the transcript explicitly reverses them.
+        - "tracked" uses only the categories given under SPECIALIST TRACKING, and only new items from these lines.
+          "covered" uses only the wording given under CHECKLIST. Omit both when none are given.
         - Lines marked [agent] are the AI facilitator; do not credit it with decisions.
         - Be terse. These notes are read aloud and posted to chat.
         """;
@@ -54,9 +58,15 @@ public sealed class MeetingScribe
         }
 
         MeetingNotes current = meeting.SnapshotNotes();
+        IReadOnlyList<MeetingSkill> skills = meeting.ActiveSkills;
+        string categories = string.Join(", ", skills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));
+        string checklist = string.Join("; ", meeting.UncoveredChecklist);
         string user = $"""
             CURRENT NOTES:
             {RenderNotesForModel(current)}
+
+            SPECIALIST TRACKING: {(categories.Length > 0 ? categories : "(none)")}
+            CHECKLIST: {(checklist.Length > 0 ? checklist : "(none)")}
 
             NEW TRANSCRIPT LINES:
             {RenderTurns(turns)}
@@ -71,6 +81,26 @@ public sealed class MeetingScribe
             return;
         }
 
+        HashSet<string> allowed = new(skills.SelectMany(s => s.Track), StringComparer.OrdinalIgnoreCase);
+        if (result["tracked"] is JsonObject tracked)
+        {
+            foreach ((string category, JsonNode? items) in tracked)
+            {
+                if (allowed.Contains(category))
+                {
+                    foreach (string item in ReadStrings(items))
+                    {
+                        meeting.AddTracked(category, item);
+                    }
+                }
+            }
+        }
+
+        HashSet<string> open = new(meeting.UncoveredChecklist, StringComparer.OrdinalIgnoreCase);
+        foreach (string item in ReadStrings(result["covered"]).Where(open.Contains))
+        {
+            meeting.MarkCovered(item);
+        }
         string summary = result["summary"]?.GetValue<string>() ?? current.Summary;
         List<string> decisions = ReadStrings(result["decisions"]);
         List<string> questions = ReadStrings(result["open_questions"]);
@@ -128,8 +158,15 @@ public sealed class MeetingScribe
             return null;
         }
 
+        string specialism = string.Join("\n", meeting.ActiveSkills.Select(s =>
+            $"- {s.Name}: {s.Description}. Tracks: {string.Join(", ", s.Track)}. Should cover: {string.Join("; ", s.Checklist)}"));
+
         string user = $"""
             MEETING: {meeting.Subject ?? "(untitled)"}, {(int)meeting.Elapsed.TotalMinutes} minutes
+            FACILITATOR PURPOSE: {meeting.Profile.Purpose}
+            SPECIALISMS (frame the insights through these lenses):
+            {(specialism.Length > 0 ? specialism : "(general meeting)")}
+            NOT COVERED: {string.Join("; ", meeting.UncoveredChecklist)}
 
             RUNNING NOTES:
             {RenderNotesForModel(notes)}
@@ -226,6 +263,41 @@ public sealed class MeetingScribe
             foreach (string q in notes.OpenQuestions)
             {
                 md.Append("- ").AppendLine(q);
+            }
+
+            md.AppendLine();
+        }
+
+        IReadOnlyList<string> parked = meeting.ParkingLot;
+        if (parked.Count > 0)
+        {
+            md.AppendLine("**Parking lot**");
+            foreach (string p in parked)
+            {
+                md.Append("- ").AppendLine(p);
+            }
+
+            md.AppendLine();
+        }
+
+        foreach ((string category, IReadOnlyList<string> items) in meeting.Tracked)
+        {
+            md.Append("**").Append(category).AppendLine("**");
+            foreach (string item in items)
+            {
+                md.Append("- ").AppendLine(item);
+            }
+
+            md.AppendLine();
+        }
+
+        IReadOnlyList<string> uncovered = meeting.UncoveredChecklist;
+        if (uncovered.Count > 0)
+        {
+            md.AppendLine("**Not covered this time**");
+            foreach (string u in uncovered)
+            {
+                md.Append("- ").AppendLine(u);
             }
 
             md.AppendLine();

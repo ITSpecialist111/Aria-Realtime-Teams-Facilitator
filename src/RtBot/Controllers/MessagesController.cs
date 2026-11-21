@@ -119,6 +119,7 @@ public sealed partial class MessagesController : ControllerBase
          Reply in concise Teams markdown. Use tools for anything about organisation data; never invent facts.
          Use record_action_item / record_decision when the message assigns work or states an agreement.
          {(meeting.IsRestricted ? "Someone external is present: do not reveal internal information." : string.Empty)}
+         {SkillLibrary.RenderInstructions(meeting.Profile, meeting.ActiveSkills)}
 
          Current meeting state:
          {meeting.RenderBriefing()}

@@ -12,4 +12,7 @@ public interface IMeetingActions
     Task<byte[]?> CaptureSharedScreenAsync(CancellationToken cancellationToken);
 
     Task LeaveAsync(CancellationToken cancellationToken);
+
+    /// <summary>Re-applies instructions after the active skills change.</summary>
+    Task SkillsChangedAsync(CancellationToken cancellationToken);
 }

@@ -78,6 +78,50 @@ public sealed class TextModelClient
         }
     }
 
+    /// <summary>Asks about an image and expects a JSON object back.</summary>
+    public async Task<JsonNode?> AnalyseImageJsonAsync(
+        string model,
+        string system,
+        string question,
+        byte[] jpeg,
+        CancellationToken cancellationToken)
+    {
+        JsonObject body = new()
+        {
+            ["model"] = model,
+            ["messages"] = new JsonArray
+            {
+                new JsonObject { ["role"] = "system", ["content"] = system },
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject { ["type"] = "text", ["text"] = question },
+                        new JsonObject
+                        {
+                            ["type"] = "image_url",
+                            ["image_url"] = new JsonObject { ["url"] = "data:image/jpeg;base64," + Convert.ToBase64String(jpeg), ["detail"] = "high" },
+                        },
+                    },
+                },
+            },
+            ["response_format"] = new JsonObject { ["type"] = "json_object" },
+        };
+
+        JsonNode? response = await PostAsync(body, cancellationToken).ConfigureAwait(false);
+        string? content = response?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
+        try
+        {
+            return string.IsNullOrWhiteSpace(content) ? null : JsonNode.Parse(content);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Vision model returned malformed JSON.");
+            return null;
+        }
+    }
+
     /// <summary>Describes or answers a question about an image.</summary>
     public async Task<string> DescribeImageAsync(
         string model,
@@ -95,9 +139,10 @@ public sealed class TextModelClient
                 new JsonObject
                 {
                     ["role"] = "system",
-                    ["content"] = "You are looking at a screen shared in a business meeting. Be concrete and brief: " +
-                                  "your answer will be read aloud. Quote figures and headings exactly. If text is too " +
-                                  "small to read, say so rather than guessing.",
+                    ["content"] = "You are looking at an image from a business meeting: a shared screen, or something held " +
+                                  "up to a camera such as a drawing or whiteboard. Be concrete and brief: your answer will " +
+                                  "be read aloud. Quote figures and headings exactly. If something is too small or blurred " +
+                                  "to read, say so rather than guessing.",
                 },
                 new JsonObject
                 {

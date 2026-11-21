@@ -62,6 +62,20 @@ public sealed partial class MessagesController : ControllerBase
             return Ok();
         }
 
+        // With chat RSC the bot receives every message; it only answers when addressed.
+        string? botId = activity.TryGetProperty("recipient", out JsonElement r) ? Str(r, "id") : null;
+        bool mentioned = conversationType == "personal" ||
+            (activity.TryGetProperty("entities", out JsonElement entities) && entities.ValueKind == JsonValueKind.Array &&
+             entities.EnumerateArray().Any(e => Str(e, "type") == "mention" &&
+                 e.TryGetProperty("mentioned", out JsonElement m) && Str(m, "id") == botId));
+
+        if (!mentioned)
+        {
+            CallHandler? live = _calling.FindByThread(conversationId.Split(';')[0]);
+            live?.Meeting.AddTurn(new TranscriptTurn(DateTimeOffset.UtcNow, sender, $"(in chat) {MeetingContext.OneLine(text, 1000)}", IsAgent: false));
+            return Ok();
+        }
+
         // Answering can take 15 s with a Work IQ call; Teams retries if the webhook is slow, so
         // acknowledge now and reply proactively.
         _ = Task.Run(() => AnswerAsync(serviceUrl, conversationId, conversationType, activityId, sender, tenant, text));

@@ -13,6 +13,25 @@ public sealed record AgendaItem(string Title, double? Minutes);
 
 public sealed record MeetingTimer(string Label, DateTimeOffset EndsAt);
 
+/// <summary>Something Aria noticed or found: a risk, a facilitation nudge, organisation knowledge, a skill switch.</summary>
+public sealed record MeetingInsight(
+    string Kind,
+    string Severity,
+    string Title,
+    string Text,
+    string? Citation,
+    DateTimeOffset At);
+
+/// <summary>A still captured from a camera or screen share, with what the vision model made of it.</summary>
+public sealed record VisualNote(
+    string Title,
+    string Summary,
+    IReadOnlyList<string> KeyPoints,
+    string Source,
+    string? CapturedFrom,
+    byte[] Jpeg,
+    DateTimeOffset At);
+
 /// <summary>Where the agenda stands right now.</summary>
 public sealed record AgendaStatus(
     IReadOnlyList<AgendaItem> Items,
@@ -93,9 +112,10 @@ public sealed class MeetingContext
     private RtBot.Media.TileView _view;
     private DateTimeOffset _viewSetAt;
 
-    /// <summary>The tile's current view; a breakdown reverts to the overview after 90 seconds.</summary>
+    /// <summary>The tile's current view; a breakdown reverts to the overview after 90 seconds, a capture after 45.</summary>
     public RtBot.Media.TileView CurrentView =>
-        _view != RtBot.Media.TileView.Overview && DateTimeOffset.UtcNow - _viewSetAt < TimeSpan.FromSeconds(90)
+        _view != RtBot.Media.TileView.Overview &&
+        DateTimeOffset.UtcNow - _viewSetAt < TimeSpan.FromSeconds(_view == RtBot.Media.TileView.Capture ? 45 : 90)
             ? _view
             : RtBot.Media.TileView.Overview;
 
@@ -103,6 +123,80 @@ public sealed class MeetingContext
     {
         _viewSetAt = DateTimeOffset.UtcNow;
         _view = view;
+    }
+
+    private readonly List<VisualNote> _visuals = [];
+    private readonly List<MeetingInsight> _insights = [];
+
+    public IReadOnlyList<MeetingInsight> Insights
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _insights];
+            }
+        }
+    }
+
+    /// <summary>Adds an insight unless a recent one has the same title. Returns whether it was added.</summary>
+    public bool AddInsight(MeetingInsight insight)
+    {
+        insight = insight with
+        {
+            Kind = OneLine(insight.Kind, 20).ToLowerInvariant(),
+            Severity = insight.Severity.ToLowerInvariant() is "high" or "medium" ? insight.Severity.ToLowerInvariant() : "info",
+            Title = OneLine(insight.Title, 80),
+            Text = OneLine(insight.Text, 360),
+            Citation = insight.Citation is null ? null : OneLine(insight.Citation, 120),
+        };
+
+        if (insight.Title.Length == 0 || insight.Text.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_insights.TakeLast(12).Any(i => i.Title.Equals(insight.Title, StringComparison.OrdinalIgnoreCase)) || _insights.Count >= 100)
+            {
+                return false;
+            }
+
+            _insights.Add(insight);
+            return true;
+        }
+    }
+
+    public IReadOnlyList<VisualNote> Visuals
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _visuals];
+            }
+        }
+    }
+
+    public void AddVisual(VisualNote note)
+    {
+        note = note with
+        {
+            Title = OneLine(note.Title, 80),
+            Summary = OneLine(note.Summary, 600),
+            KeyPoints = [.. note.KeyPoints.Select(p => OneLine(p, 200)).Where(p => p.Length > 0).Take(8)],
+        };
+
+        lock (_gate)
+        {
+            if (_visuals.Count < 20)
+            {
+                _visuals.Add(note);
+            }
+        }
+
+        ShowView(RtBot.Media.TileView.Capture);
     }
 
     public IReadOnlyList<MeetingSkill> ActiveSkills
@@ -586,6 +680,19 @@ public sealed class MeetingContext
         if (uncovered.Count > 0)
         {
             sb.Append("Not yet covered: ").AppendLine(string.Join("; ", uncovered));
+        }
+
+        IReadOnlyList<MeetingInsight> insights = Insights;
+        if (insights.Count > 0)
+        {
+            sb.Append("Recent insights (shown on your tile, not yet spoken): ").AppendLine(string.Join("; ", insights.TakeLast(5).Select(i =>
+                $"[{i.Kind}] {i.Title}: {i.Text}{(i.Citation is null ? string.Empty : $" (source: {i.Citation})")}")));
+        }
+
+        IReadOnlyList<VisualNote> visuals = Visuals;
+        if (visuals.Count > 0)
+        {
+            sb.Append("Captured visuals: ").AppendLine(string.Join("; ", visuals.Select(v => $"{v.Title}: {v.Summary}")));
         }
 
         if (!string.IsNullOrWhiteSpace(notes.Summary))

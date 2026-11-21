@@ -136,14 +136,30 @@ public sealed class TeamsCallingService : IAsyncDisposable
                 SupportedAudioFormat = AudioFormat.Pcm16K,
                 ReceiveUnmixedMeetingAudio = _options.Media.ReceiveUnmixedAudio,
             },
+            [
+                new VideoSocketSettings
+                {
+                    // Aria's tile: a rendered facilitator view instead of the default bot placeholder.
+                    StreamDirections = StreamDirection.Sendonly,
+                    SupportedSendVideoFormats = VideoTilePump.SupportedFormats,
+                    MaxConcurrentSendStreams = 1,
+                },
+                new VideoSocketSettings
+                {
+                    // Participant cameras, subscribed only for the moment a capture is requested.
+                    StreamDirections = StreamDirection.Recvonly,
+                    ReceiveColorFormat = VideoColorFormat.NV12,
+                    MediaType = MediaType.Video,
+                },
+            ],
             new VideoSocketSettings
             {
-                // Aria's tile: a rendered facilitator view instead of the default bot placeholder.
-                StreamDirections = StreamDirection.Sendonly,
-                SupportedSendVideoFormats = VideoTilePump.SupportedFormats,
-                MaxConcurrentSendStreams = 1,
+                StreamDirections = StreamDirection.Recvonly,
+                ReceiveColorFormat = VideoColorFormat.NV12,
+                MediaType = MediaType.Vbss,
             },
-            mediaSessionId: mediaSessionId);
+            null,
+            mediaSessionId);
 
     /// <summary>
     /// Answers calls placed to the agent's resource account.

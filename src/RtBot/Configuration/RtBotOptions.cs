@@ -229,6 +229,12 @@ public sealed class FacilitatorOptions
     /// <summary>Instance profile name: <c>profiles/&lt;name&gt;.md</c> in the custom or built-in skills folder.</summary>
     public string Profile { get; set; } = "default";
 
+    /// <summary>Look things up in Work IQ in the background when the discussion would benefit, and show them on the tile.</summary>
+    public bool LiveKnowledge { get; set; } = true;
+
+    /// <summary>Minimum gap between background lookups, so the tile isn't flooded.</summary>
+    public int KnowledgeCooldownSeconds { get; set; } = 120;
+
     /// <summary>Custom skills and profiles, outside the app folder so redeploys keep them.</summary>
     public string CustomSkillsPath { get; set; } = @"C:\rtbot\skills";
 }

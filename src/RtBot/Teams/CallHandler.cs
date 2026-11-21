@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Calls.Media;
@@ -46,6 +48,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     private OutboundAudioPacer? _pacer;
     private VideoTilePump? _tile;
+    private VisualCapture? _visual;
     private string? _caption;
     private DateTimeOffset? _captionAt;
     private Task? _inboundPump;
@@ -55,6 +58,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private string _currentSpeaker = "Someone";
     private DateTimeOffset? _aloneSince;
     private DateTimeOffset _lastScribe = DateTimeOffset.UtcNow;
+    private DateTimeOffset _lastLookup = DateTimeOffset.MinValue;
+    private int _lookupRunning;
+    private TextModelClient? _textModel;
     private bool _halfwayAnnounced;
     private bool _wrapUpAnnounced;
     private bool _externalAnnounced;
@@ -82,6 +88,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         _mailer = mailer;
         _agendaLoader = agendaLoader;
         _skills = skills;
+        _textModel = textModel;
         _options = options;
         _facilitator = options.Facilitator;
         _joinUrl = joinUrl;
@@ -154,7 +161,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             _caption,
             _captionAt,
             Meeting.SpecialismLabel,
-            Meeting.CurrentView);
+            Meeting.CurrentView,
+            Meeting.Visuals.LastOrDefault(),
+            Meeting.Insights);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -170,6 +179,9 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             _tile = new VideoTilePump(videoSocket, BuildTileState, _logger);
             _tile.Start();
         }
+
+        ILocalMediaSession media = _call.GetLocalMediaSession();
+        _visual = new VisualCapture(media.VideoSockets?.Skip(1).FirstOrDefault(), media.VbssSocket, _logger);
 
         _bridge.AgentSpoke += text =>
         {
@@ -238,15 +250,126 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     public Task SkillsChangedAsync(CancellationToken cancellationToken) =>
         _bridge.RefreshSessionAsync(cancellationToken);
 
+    private async Task ActOnScribeAsync(ScribeOutcome outcome, CancellationToken cancellationToken)
+    {
+        if (outcome.SkillShift is { } shift &&
+            _availableSkills.FirstOrDefault(s => s.Name.Equals(shift, StringComparison.OrdinalIgnoreCase)) is { } skill &&
+            Meeting.ActivateSkill(skill))
+        {
+            Meeting.AddInsight(new MeetingInsight("skill", "info", "Specialist skill activated", $"{skill.Name}: {skill.Description}", null, DateTimeOffset.UtcNow));
+            await _bridge.RefreshSessionAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("Skill {Skill} activated from conversation.", skill.Name);
+        }
+
+        // Live knowledge: look it up quietly and put it on the tile; Aria mentions it only if asked or it matters.
+        if (outcome.Lookup is { } question &&
+            _facilitator.LiveKnowledge &&
+            !Meeting.IsRestricted &&
+            DateTimeOffset.UtcNow - _lastLookup > TimeSpan.FromSeconds(_facilitator.KnowledgeCooldownSeconds) &&
+            Tools.AvailableSpecs().Any(s => s.Name == "workiq_ask") &&
+            Interlocked.CompareExchange(ref _lookupRunning, 1, 0) == 0)
+        {
+            _lastLookup = DateTimeOffset.UtcNow;
+            _ = Task.Run(() => LookupKnowledgeAsync(question, _cts.Token), CancellationToken.None);
+        }
+    }
+
+    private async Task LookupKnowledgeAsync(string question, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(45));
+
+            string raw = await Tools.InvokeAsync("workiq_ask", JsonSerializer.Serialize(new { question }), timeout.Token).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(raw) || raw.Contains("\"error\"", StringComparison.Ordinal) || _textModel is null)
+            {
+                _logger.LogWarning("Live knowledge lookup returned nothing usable for: {Question}", question);
+                return;
+            }
+
+            JsonNode? card = await _textModel.CompleteJsonAsync(
+                _facilitator.ScribeModel,
+                """
+                Turn an answer from the organisation's Microsoft 365 data into a short card for a live meeting.
+                Return JSON: {"relevant": true|false, "title": "3-6 words", "text": "the useful fact in at most two sentences", "source": "the document, email, meeting or chat it came from, if named, else null"}
+                Set relevant to false if the answer is empty, says nothing was found, or doesn't answer the question.
+                """,
+                $"QUESTION: {question}\nANSWER: {(raw.Length > 6000 ? raw[..6000] : raw)}",
+                timeout.Token).ConfigureAwait(false);
+
+            if (card?["relevant"]?.GetValue<bool>() != true)
+            {
+                _logger.LogWarning("Live knowledge lookup not relevant for: {Question}", question);
+                return;
+            }
+
+            string? source = card["source"] is JsonValue sv && sv.TryGetValue(out string? s) ? s : null;
+
+            // An external guest may have joined while the lookup ran.
+            if (Meeting.IsRestricted)
+            {
+                _logger.LogWarning("Discarded a live knowledge result: the meeting became restricted.");
+                return;
+            }
+
+            bool added = Meeting.AddInsight(new MeetingInsight(
+                "knowledge",
+                "info",
+                card["title"]?.GetValue<string>() ?? "From your Microsoft 365 data",
+                card["text"]?.GetValue<string>() ?? string.Empty,
+                $"Work IQ{(string.IsNullOrWhiteSpace(source) ? string.Empty : " \u00B7 " + source)}",
+                DateTimeOffset.UtcNow));
+            _logger.LogWarning("Live knowledge surfaced ({Added}) for: {Question}", added, question);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Live knowledge lookup failed.");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _lookupRunning, 0);
+        }
+    }
+
     public Task<bool> PostToChatAsync(string markdown, CancellationToken cancellationToken) =>
         Meeting.ThreadId is { } thread
             ? _chat.PostAsync(thread, markdown, cancellationToken)
             : Task.FromResult(false);
 
-    public Task<byte[]?> CaptureSharedScreenAsync(CancellationToken cancellationToken)
+    public async Task<(byte[]? Jpeg, string? From)> CaptureVisualAsync(bool screen, CancellationToken cancellationToken)
     {
-        // Screen-share capture needs a VBSS receive socket; not wired in this build.
-        return Task.FromResult<byte[]?>(null);
+        if (_visual is null)
+        {
+            return (null, null);
+        }
+
+        // Screen: whoever is sharing. Camera: the current speaker if their camera is on, else anyone's.
+        Modality wanted = screen ? Modality.VideoBasedScreenSharing : Modality.Video;
+        List<(IParticipant P, MediaStream S)> sources = [.. _call.Participants
+            .Where(p => p.Resource?.IsInLobby != true && p.Resource?.Info?.Identity?.Application is null)
+            .SelectMany(p => (p.Resource?.MediaStreams ?? []).Select(s => (p, s)))
+            .Where(x => x.s.MediaType == wanted &&
+                        x.s.Direction is MediaDirection.SendOnly or MediaDirection.SendReceive &&
+                        x.s.SourceId is not null && uint.TryParse(x.s.SourceId, out _))];
+
+        (IParticipant P, MediaStream S) pick = sources.FirstOrDefault(x =>
+            string.Equals(x.P.Resource?.Info?.Identity?.User?.DisplayName, _currentSpeaker, StringComparison.OrdinalIgnoreCase));
+        if (pick.P is null)
+        {
+            pick = sources.FirstOrDefault();
+        }
+
+        if (pick.P is null)
+        {
+            _logger.LogWarning("No {Kind} stream to capture.", screen ? "screen-share" : "camera");
+            return (null, null);
+        }
+
+        string? from = pick.P.Resource?.Info?.Identity?.User?.DisplayName;
+        byte[]? jpeg = await _visual.CaptureAsync(screen, uint.Parse(pick.S.SourceId!), cancellationToken).ConfigureAwait(false);
+        _logger.LogWarning("Captured {Kind} from {From}: {Bytes} bytes.", screen ? "screen" : "camera", from, jpeg?.Length ?? 0);
+        return (jpeg, from);
     }
 
     public async Task LeaveAsync(CancellationToken cancellationToken)
@@ -344,7 +467,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         if (now - _lastScribe >= TimeSpan.FromSeconds(_facilitator.ScribeIntervalSeconds))
         {
             _lastScribe = now;
-            await _scribe.UpdateAsync(Meeting, cancellationToken).ConfigureAwait(false);
+            ScribeOutcome outcome = await _scribe.UpdateAsync(Meeting, cancellationToken, _availableSkills).ConfigureAwait(false);
+            await ActOnScribeAsync(outcome, cancellationToken).ConfigureAwait(false);
         }
 
         if (_facilitator.ProactiveTimeChecks && Meeting.TryClaimOverrun(out AgendaItem? overrun) && overrun is not null)
@@ -757,6 +881,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
                 {
                     await _tile.DisposeAsync().ConfigureAwait(false);
                 }
+
+                _visual?.Dispose();
 
                 if (_pacer is not null)
                 {

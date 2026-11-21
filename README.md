@@ -18,6 +18,10 @@ Ask for detail ("Aria, show us the actions") and the tile switches to a full lis
 
 <img src="docs/media/tile-actions.png" alt="Breakdown view listing every action with owner and due date" width="480"> <img src="docs/media/tile-overrun.png" alt="Overview with an overrunning agenda item, meeting over time, and the external-guest banner" width="480">
 
+**Live insights and knowledge.** The fourth card shows what Aria has noticed: risks nobody owns, people talking past each other, a topic going round in circles. It also shows what she has **found in your Microsoft 365 data through Work IQ while you talk**, each item with its source. **Vision:** hold a sketch up to your webcam, or share your screen, and say "Aria, capture this". The image and her analysis appear on the tile, any actions or decisions written on it join the notes, and it is embedded in the recap email.
+
+<img src="docs/media/tile-insights.png" alt="Insights breakdown: a Work IQ finding with its source, and an alignment gap" width="480"> <img src="docs/media/tile-capture.png" alt="Capture view: an image with its title, summary and key points" width="480">
+
 *Sample renders from the same code that streams into the call (sample data).*
 
 **Early voice demo.**
@@ -73,9 +77,13 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Answers only when addressed** | Continuous transcription. A reply starts only when the agent's name is said as a whole word. The same speaker can ask a follow-up within 10 s without repeating the name. |
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
 | **Meeting memory** | A text model folds the conversation into running notes every 45 s: summary, decisions, action items and open questions. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
-| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `show_on_screen`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
+| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `show_on_screen`, `look_at`, `capture_visual`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
 | **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
 | **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
+| **Live insights** | Each scribe pass can raise up to two facilitator insights (risk, alignment, facilitation, pace), colour-coded by severity on the tile. If the conversation moves into another domain, Aria switches on the matching skill and says so. |
+| **Live knowledge (Work IQ)** | When a fact from outside the meeting would help ("what did we agree with the steel supplier?"), Aria asks Work IQ in the background and puts a short, sourced answer on the tile. Rate-limited to one lookup every 2 minutes, and switched off while an external guest is present. |
+| **Vision** | `look_at` answers a question about the screen share or whatever the speaker holds up to their camera. `capture_visual` records it: title, summary, key points, plus any actions, decisions and tracked items written on it. The image is shown on the tile and embedded in the email. Frames are taken on demand only. |
+| **Chat** | Every meeting-chat message goes into the notes, so actions typed in chat are picked up. Aria replies only when @mentioned. |
 | **Work IQ** | Mail, calendar, files, chats and people lookups through the Work IQ MCP server, run as a delegated service account. |
 | **Meeting chat** | Posts a join notice and the recap through Bot Framework proactive messaging. Answers @mentions with the same tools and notes as the voice path. |
 | **Time-keeping** | Keeps each agenda item to its timebox and, when one overruns, asks whether to move on, extend or park it. Gives a halfway check and a wrap-up warning that lists anything the active skills say hasn't been covered. |
@@ -111,6 +119,8 @@ Guidance in plain English: run order, what to probe, what never to say...
 | body | Behaviour guidance appended to the voice and chat instructions, for example "open with safety" or "never state a contractual position as fact". |
 
 **Built-in skills:** `construction-project`, `project-delivery` (RAID and governance), `agile-sprint`, `client-sales` (MEDDICC), `incident-review` (blameless post-incident review).
+
+**Customer skills** layer one organisation's or project's context on top of a domain skill: the people, the contract, key dates, and what matters most. [`samples/skills/riverside-phase2`](samples/skills/riverside-phase2/SKILL.md) is a fictional example for a housing scheme under an NEC4 contract. Drop it into the custom skills folder, and any meeting mentioning "Riverside" picks it up automatically; or say "Aria, use the Riverside skill".
 
 **Profiles** (`profiles/<name>.md`) set the purpose and the skills that are always on for a deployment:
 
@@ -510,7 +520,9 @@ In a meeting:
 - *"Aria, let's move on."* / *"Aria, give us two more minutes."* / *"Aria, park that."*
 - *"Aria, log an RFI: Sam needs the revised steel details by Thursday."* (with the construction skill)
 - *"Aria, what haven't we covered?"*
-- *"Aria, show us the actions."* / *"...the decisions"* / *"...the agenda"* / *"Aria, back to the overview."*
+- *"Aria, show us the actions."* / *"...the decisions"* / *"...the agenda"* / *"...the insights"* / *"Aria, back to the overview."*
+- *"Aria, capture this."* (holding a sketch up to the camera, or sharing your screen)
+- *"Aria, what does this slide say about the budget?"*
 - `@Aria` in the meeting chat for a written answer.
 
 ---
@@ -543,7 +555,7 @@ docs/ARCHITECTURE.md       decision record and audio-path detail
 - **Windows VM required.** The Teams real-time media SDK is Windows x64 only and needs a public IP or a NAT per instance. A call is pinned to the VM that joined it.
 - **Microsoft discourages this media path for AI agents.** Track Microsoft's guidance before production use.
 - **No recording indicator** (see the security model). Disclosure is the join notice.
-- **Screen-share reading is not wired.** The `look_at_shared_screen` tool exists but returns nothing until a VBSS receive socket is added.
+- **Vision is on demand.** Aria sees only the single frame taken when someone asks her to look or capture; she does not watch video continuously. A camera capture needs the speaker's camera to be on.
 - **Speaker attribution uses the dominant speaker.** It can misattribute when people talk over each other.
 - **Internal or external classification** relies on the tenant id Teams reports for each participant. Anyone it can't prove is internal is treated as external.
 - **Voice Live sessions last about 60 minutes.** The bridge reconnects and re-seeds the notes, but the model's verbatim memory before the reconnect is lost.

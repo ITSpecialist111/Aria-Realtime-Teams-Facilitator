@@ -369,7 +369,10 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
          - Questions about the meeting itself (who said what, what was agreed, time left) are answered from get_meeting_status.
          - Questions needing organisation data (mail, calendar, files, chats, people, documents) use the workiq tools.
            Answer from tool results, never from memory. If a tool returns nothing useful, say so plainly.
-         - When someone refers to something on screen, use look_at_shared_screen.
+         - When someone refers to something on screen or holds something up to their camera, use look_at.
+           When asked to capture, snap or remember a diagram, whiteboard, sketch or slide, use capture_visual,
+           then say in one or two sentences what you captured.
+         - When asked to show actions, decisions or the agenda, use show_on_screen.
          - When asked for a plan, timeline or draft, write it into the meeting chat and summarise it aloud in one sentence.
 
          Never invent names, dates, figures or document contents. If you are unsure, say so.

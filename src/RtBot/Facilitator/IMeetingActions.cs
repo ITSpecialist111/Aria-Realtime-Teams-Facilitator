@@ -8,8 +8,8 @@ public interface IMeetingActions
 
     Task<bool> PostToChatAsync(string markdown, CancellationToken cancellationToken);
 
-    /// <summary>JPEG of the current screen share, or null when nobody is sharing.</summary>
-    Task<byte[]?> CaptureSharedScreenAsync(CancellationToken cancellationToken);
+    /// <summary>JPEG of the active screen share, or of a participant's camera (the current speaker's when unspecified), with who it came from.</summary>
+    Task<(byte[]? Jpeg, string? From)> CaptureVisualAsync(bool screen, CancellationToken cancellationToken);
 
     Task LeaveAsync(CancellationToken cancellationToken);
 

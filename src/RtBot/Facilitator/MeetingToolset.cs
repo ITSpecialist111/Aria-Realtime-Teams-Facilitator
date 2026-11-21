@@ -260,7 +260,7 @@ public sealed class MeetingToolset
         Add(
             "show_on_screen",
             "Change what your video tile shows. Use when someone asks to see or show the actions, decisions, tracked items, parking lot or agenda, or to go back to the overview. A list stays up for 90 seconds. After switching, summarise it aloud in one sentence.",
-            """{"type":"object","properties":{"view":{"type":"string","enum":["overview","actions","decisions","tracked","parked","agenda"]}},"required":["view"]}""",
+            """{"type":"object","properties":{"view":{"type":"string","enum":["overview","actions","decisions","tracked","parked","agenda","insights","capture"]}},"required":["view"]}""",
             (args, _) =>
             {
                 RtBot.Media.TileView view = Str(args, "view").ToLowerInvariant() switch
@@ -270,6 +270,8 @@ public sealed class MeetingToolset
                     "tracked" => RtBot.Media.TileView.Tracked,
                     "parked" => RtBot.Media.TileView.Parked,
                     "agenda" => RtBot.Media.TileView.Agenda,
+                    "insights" => RtBot.Media.TileView.Insights,
+                    "capture" when _meeting.Visuals.Count > 0 => RtBot.Media.TileView.Capture,
                     _ => RtBot.Media.TileView.Overview,
                 };
                 _meeting.ShowView(view);
@@ -365,22 +367,97 @@ public sealed class MeetingToolset
 
         if (_visionEnabled)
         {
+            const string sourceSchema = "\"source\":{\"type\":\"string\",\"enum\":[\"camera\",\"screen\"],\"description\":\"camera: something held up to the speaker's webcam (paper, whiteboard, object). screen: the active screen share.\"}";
+
             Add(
-                "look_at_shared_screen",
-                "Look at whatever is being screen-shared right now and answer a question about it. Use when someone refers to 'this slide', 'this chart', 'on screen', and similar.",
-                """{"type":"object","properties":{"question":{"type":"string","description":"What to find out from the screen"}},"required":["question"]}""",
+                "look_at",
+                "Look at the active screen share or at what the current speaker is holding up to their camera, and answer a question about it. Use for 'this slide', 'on screen', 'what I'm holding up', 'this drawing'. Does not record anything.",
+                "{\"type\":\"object\",\"properties\":{" + sourceSchema + ",\"question\":{\"type\":\"string\",\"description\":\"What to find out\"}},\"required\":[\"source\",\"question\"]}",
                 async (args, ct) =>
                 {
-                    byte[]? jpeg = await _actions.CaptureSharedScreenAsync(ct).ConfigureAwait(false);
+                    bool screen = Str(args, "source").Equals("screen", StringComparison.OrdinalIgnoreCase);
+                    (byte[]? jpeg, string? from) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
                     if (jpeg is null)
                     {
-                        return Error("Nobody is sharing their screen.");
+                        return Error(screen ? "Nobody is sharing their screen, or no frame arrived." : "No camera video arrived. The person may need to turn their camera on.");
                     }
 
-                    string answer = await _textModel
-                        .DescribeImageAsync(_visionModel, Str(args, "question"), jpeg, ct)
-                        .ConfigureAwait(false);
-                    return JsonSerializer.Serialize(new { answer });
+                    string answer = await _textModel.DescribeImageAsync(_visionModel, Str(args, "question"), jpeg, ct).ConfigureAwait(false);
+                    return JsonSerializer.Serialize(new { answer, from });
+                });
+
+            Add(
+                "capture_visual",
+                "Capture what is on the screen share or held up to the camera (a diagram, sketch, whiteboard, slide) as a record of the meeting: it is analysed, shown on your video tile, and included in the recap and email. Use when asked to capture, snap, save or remember something visual. Then summarise in one or two sentences what you captured.",
+                "{\"type\":\"object\",\"properties\":{" + sourceSchema + ",\"purpose\":{\"type\":\"string\",\"description\":\"What it is or why it is being captured, if said\"}},\"required\":[\"source\"]}",
+                async (args, ct) =>
+                {
+                    bool screen = Str(args, "source").Equals("screen", StringComparison.OrdinalIgnoreCase);
+                    (byte[]? jpeg, string? from) = await _actions.CaptureVisualAsync(screen, ct).ConfigureAwait(false);
+                    if (jpeg is null)
+                    {
+                        return Error(screen ? "Nobody is sharing their screen, or no frame arrived." : "No camera video arrived. The person may need to turn their camera on.");
+                    }
+
+                    string categories = string.Join(", ", _meeting.ActiveSkills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));
+                    JsonNode? result = await _textModel.AnalyseImageJsonAsync(
+                        _visionModel,
+                        """
+                        You capture a visual from a business meeting (a diagram, sketch, whiteboard, document or slide) for the meeting record.
+                        Return JSON: {"title":"3-6 words","summary":"2-3 sentences on what it shows and means","key_points":["..."],
+                        "actions":[{"owner":"name","task":"...","due":null}],"decisions":["..."],"tracked":{"<category>":["..."]}}
+                        Only include actions, decisions or tracked items that are written or drawn on it. Use only the tracked categories given.
+                        If it is unreadable, say so in the summary and leave the lists empty. Never invent names, dates or figures.
+                        """,
+                        $"Purpose: {Opt(args, "purpose") ?? "not stated"}. Tracked categories: {(categories.Length > 0 ? categories : "none")}.",
+                        jpeg,
+                        ct).ConfigureAwait(false);
+
+                    if (result is null)
+                    {
+                        return Error("I couldn't analyse the image.");
+                    }
+
+                    string title = result["title"]?.GetValue<string>() ?? "Captured visual";
+                    string summary = result["summary"]?.GetValue<string>() ?? string.Empty;
+                    List<string> points = Strings(result["key_points"]);
+
+                    foreach (string d in Strings(result["decisions"]))
+                    {
+                        _meeting.AddDecision(d);
+                    }
+
+                    if (result["actions"] is JsonArray acts)
+                    {
+                        foreach (JsonNode? a in acts)
+                        {
+                            string? owner = a?["owner"]?.GetValue<string>();
+                            string? task = a?["task"]?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(task))
+                            {
+                                string? due = a?["due"] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
+                                _meeting.AddAction(new ActionItem(owner, task, due, DateTimeOffset.UtcNow));
+                            }
+                        }
+                    }
+
+                    HashSet<string> allowed = new(_meeting.ActiveSkills.SelectMany(s => s.Track), StringComparer.OrdinalIgnoreCase);
+                    if (result["tracked"] is JsonObject tracked)
+                    {
+                        foreach ((string category, JsonNode? items) in tracked)
+                        {
+                            if (allowed.Contains(category))
+                            {
+                                foreach (string item in Strings(items))
+                                {
+                                    _meeting.AddTracked(category, item);
+                                }
+                            }
+                        }
+                    }
+
+                    _meeting.AddVisual(new VisualNote(title, summary, points, screen ? "Screen share" : "Camera", from, jpeg, DateTimeOffset.UtcNow));
+                    return JsonSerializer.Serialize(new { captured = title, summary, key_points = points, shown_on_tile = true, in_recap = true });
                 });
         }
 
@@ -420,6 +497,11 @@ public sealed class MeetingToolset
     }
 
     private static string Ok(string message) => JsonSerializer.Serialize(new { ok = true, message });
+
+    private static List<string> Strings(JsonNode? node) =>
+        node is JsonArray array
+            ? [.. array.Select(n => n is JsonValue v && v.TryGetValue(out string? s) ? s : null).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!)]
+            : [];
 
     private static string Error(string message) => JsonSerializer.Serialize(new { error = message });
 

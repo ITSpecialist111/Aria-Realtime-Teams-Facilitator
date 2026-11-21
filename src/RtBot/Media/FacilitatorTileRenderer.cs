@@ -23,6 +23,8 @@ public enum TileView
     Tracked,
     Parked,
     Agenda,
+    Capture,
+    Insights,
 }
 
 /// <summary>Everything the tile shows, captured once per frame.</summary>
@@ -44,7 +46,9 @@ public sealed record TileState(
     string? Caption,
     DateTimeOffset? CaptionAt,
     string? Specialism = null,
-    TileView View = TileView.Overview);
+    TileView View = TileView.Overview,
+    VisualNote? Capture = null,
+    IReadOnlyList<MeetingInsight>? Insights = null);
 
 /// <summary>
 /// Draws Aria's video tile: presence orb and meeting clock across the top, a caption strip, and
@@ -126,12 +130,84 @@ public sealed class FacilitatorTileRenderer : IDisposable
             DrawCaption(s, 340);
             DrawCards(s);
         }
+        else if (s.View == TileView.Capture && s.Capture is { } capture)
+        {
+            DrawCapture(s, capture);
+        }
         else
         {
             DrawBreakdown(s);
         }
 
         return ToNv12();
+    }
+
+    private Bitmap? _captureImage;
+    private VisualNote? _captureFor;
+
+    private void DrawCapture(TileState s, VisualNote capture)
+    {
+        const float x = 310, y = 22, w = 948, h = 676;
+        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 20);
+        FillRounded(TrackedTone, x, y + 24, 6, 44, 3);
+        Text("Captured", _label, TrackedTone, new RectangleF(x + 28, y + 20, 300, 20), null);
+        Text(Ellipsize(capture.Title, _name, w - 56), _name, Color.White, new RectangleF(x + 28, y + 38, w - 56, 46), null);
+        Text(Ellipsize($"{capture.Source}{(capture.CapturedFrom is null ? string.Empty : " \u00B7 " + capture.CapturedFrom)} \u00B7 {capture.At.ToLocalTime():HH:mm}", _small, w - 56), _small, Muted, new RectangleF(x + 28, y + 86, w - 56, 22), null);
+
+        // Decode once per capture, not once per frame.
+        if (!ReferenceEquals(_captureFor, capture))
+        {
+            _captureImage?.Dispose();
+            _captureImage = null;
+            _captureFor = capture;
+            try
+            {
+                using MemoryStream ms = new(capture.Jpeg);
+                using Image img = Image.FromStream(ms);
+                _captureImage = new Bitmap(img);
+            }
+            catch (ArgumentException)
+            {
+                // Unreadable image: the text still shows.
+            }
+        }
+
+        const float ix = x + 28, iy = y + 124, iw = 520, ih = 520;
+        if (_captureImage is { } image)
+        {
+            float scale = Math.Min(iw / image.Width, ih / image.Height);
+            float dw = image.Width * scale, dh = image.Height * scale;
+            FillRounded(Color.FromArgb(40, 0, 0, 0), ix, iy, iw, ih, 12);
+            _g.DrawImage(image, ix + ((iw - dw) / 2), iy + ((ih - dh) / 2), dw, dh);
+        }
+
+        float tx = ix + iw + 26, tw = x + w - 28 - tx, ty = iy;
+        foreach (string line in Wrap(capture.Summary, _item, tw, 8))
+        {
+            Text(line, _item, Color.White, new RectangleF(tx, ty, tw, 26), null);
+            ty += 25;
+        }
+
+        ty += 14;
+        foreach (string point in capture.KeyPoints.Take(6))
+        {
+            using (SolidBrush bullet = new(TrackedTone))
+            {
+                _g.FillEllipse(bullet, tx, ty + 9, 7, 7);
+            }
+
+            foreach (string line in Wrap(point, _small, tw - 18, 2))
+            {
+                Text(line, _small, Muted, new RectangleF(tx + 16, ty, tw - 18, 22), null);
+                ty += 21;
+            }
+
+            ty += 8;
+            if (ty > y + h - 40)
+            {
+                break;
+            }
+        }
     }
 
     // ---- Presence (left column) ---------------------------------------------------------
@@ -326,7 +402,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
     private void DrawCards(TileState s)
     {
-        const float y = 392, h = 306, gap = 18, w = (1236 - (2 * gap)) / 3f;
+        const float y = 392, h = 306, gap = 14, w = (1236 - (3 * gap)) / 4f;
 
         DrawCard(22, y, w, h, "Decisions", s.Decisions.Count, DecisionTone,
             [.. s.Decisions.TakeLast(3).Reverse().Select(d => (d, (string?)null))]);
@@ -349,9 +425,33 @@ public sealed class FacilitatorTileRenderer : IDisposable
             DrawCard(22 + (2 * (w + gap)), y, w, h, "Parked", s.Parked.Count, Warn,
                 [.. s.Parked.TakeLast(3).Reverse().Select(p => (p, (string?)null))]);
         }
+
+        IReadOnlyList<MeetingInsight> insights = s.Insights ?? [];
+        DrawCard(22 + (3 * (w + gap)), y, w, h, "Insights", insights.Count, InsightTone,
+            [.. insights.TakeLast(2).Reverse().Select(i => (i.Title + ": " + i.Text, (string?)(i.Citation ?? KindLabel(i.Kind))))],
+            dotColours: [.. insights.TakeLast(2).Reverse().Select(i => SeverityTone(i.Severity))]);
     }
 
-    private void DrawCard(float x, float y, float w, float h, string title, int count, Color tone, IReadOnlyList<(string Text, string? Meta)> items, string? footer = null)
+    private static readonly Color InsightTone = Color.FromArgb(129, 140, 248);
+
+    private static Color SeverityTone(string severity) => severity switch
+    {
+        "high" => Over,
+        "medium" => Warn,
+        _ => Color.FromArgb(96, 165, 250),
+    };
+
+    private static string KindLabel(string kind) => kind switch
+    {
+        "knowledge" => "Knowledge",
+        "risk" => "Risk",
+        "alignment" => "Alignment",
+        "pace" => "Pace",
+        "skill" => "Skill",
+        _ => "Facilitation",
+    };
+
+    private void DrawCard(float x, float y, float w, float h, string title, int count, Color tone, IReadOnlyList<(string Text, string? Meta)> items, string? footer = null, IReadOnlyList<Color>? dotColours = null)
     {
         FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 18);
         FillRounded(tone, x, y + 18, 5, 40, 2.5f);
@@ -366,14 +466,16 @@ public sealed class FacilitatorTileRenderer : IDisposable
             Text("Nothing yet", _item, Muted, new RectangleF(x + 22, iy, w - 44, 26), null);
         }
 
-        foreach ((string text, string? meta) in items)
+        for (int index = 0; index < items.Count; index++)
         {
-            using (SolidBrush bullet = new(tone))
+            (string text, string? meta) = items[index];
+            Color dot = dotColours is { Count: > 0 } dc ? dc[Math.Min(index, dc.Count - 1)] : tone;
+            using (SolidBrush bullet = new(dot))
             {
                 _g.FillEllipse(bullet, x + 22, iy + 10, 7, 7);
             }
 
-            foreach (string line in Wrap(text, _item, w - 60, meta is null ? 2 : 1))
+            foreach (string line in Wrap(text, _item, w - 60, meta is null ? 2 : (dotColours is null ? 1 : 3)))
             {
                 Text(line, _item, Color.White, new RectangleF(x + 38, iy, w - 60, 26), null);
                 iy += 25;
@@ -406,6 +508,8 @@ public sealed class FacilitatorTileRenderer : IDisposable
             TileView.Decisions => ("Decisions", DecisionTone, s.Decisions.Select(d => (d, (string?)null)).ToList()),
             TileView.Parked => ("Parking lot", Warn, s.Parked.Select(p => (p, (string?)null)).ToList()),
             TileView.Tracked => ("Tracked", TrackedTone, s.Tracked.SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key))).ToList()),
+            TileView.Insights => ("Insights", InsightTone, (s.Insights ?? []).Select(i =>
+                ($"{i.Title}: {i.Text}", (string?)(i.Citation ?? KindLabel(i.Kind)))).ToList()),
             _ => ("Agenda", Ok, s.Agenda.Items.Select((a, i) => (
                 $"{(s.Agenda.Completed.Contains(i) ? "\u2713 " : i == s.Agenda.CurrentIndex ? "\u25B6 " : string.Empty)}{a.Title}",
                 (string?)(a.Minutes is { } m ? $"{m:0.#} min" : null))).ToList()),
@@ -420,7 +524,9 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
         Text(Ellipsize(s.Subject ?? string.Empty, _small, w - 56), _small, Muted, new RectangleF(x + 28, y + 70, w - 56, 22), null);
 
-        const int maxRows = 10;
+        // Insights are sentences, not labels: give them room to wrap, with the source underneath.
+        bool longForm = s.View == TileView.Insights;
+        int maxRows = longForm ? 5 : 10;
         IEnumerable<(string Text, string? Meta)> shown = items.Count > maxRows ? items.Skip(items.Count - maxRows) : items;
         int number = Math.Max(0, items.Count - maxRows);
         float iy = y + 112;
@@ -433,8 +539,24 @@ public sealed class FacilitatorTileRenderer : IDisposable
         foreach ((string text, string? meta) in shown)
         {
             number++;
+            Text($"{number}", _body, tone, new RectangleF(x + 20, iy, 34, 30), RightAligned);
+
+            if (longForm)
             {
-                Text($"{number}", _body, tone, new RectangleF(x + 20, iy, 34, 30), RightAligned);
+                foreach (string line in Wrap(text, _body, w - 110, 2))
+                {
+                    Text(line, _body, Color.White, new RectangleF(x + 68, iy, w - 110, 30), null);
+                    iy += 29;
+                }
+
+                if (meta is not null)
+                {
+                    Text(Ellipsize(meta, _item, w - 110), _item, Muted, new RectangleF(x + 68, iy + 2, w - 110, 26), null);
+                    iy += 28;
+                }
+
+                iy += 22;
+                continue;
             }
 
             float metaWidth = meta is null ? 0 : Math.Min(300, _g.MeasureString(meta, _item, PointF.Empty, StringFormat.GenericTypographic).Width + 8);
@@ -609,6 +731,7 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
     public void Dispose()
     {
+        _captureImage?.Dispose();
         _g.Dispose();
         _bitmap.Dispose();
         _title.Dispose();

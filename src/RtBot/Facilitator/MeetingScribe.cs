@@ -11,11 +11,17 @@ namespace RtBot.Facilitator;
 /// re-summarising on every one is slower and costlier without being meaningfully fresher.
 /// Each pass sees the previous notes plus only the turns since, so cost stays flat over a long call.
 /// </remarks>
+/// <summary>What the scribe suggests acting on after a pass, beyond updating the notes.</summary>
+public sealed record ScribeOutcome(string? Lookup, string? SkillShift)
+{
+    public static ScribeOutcome None { get; } = new(null, null);
+}
+
 public sealed class MeetingScribe
 {
     private const string SystemPrompt = """
-        You keep the notes for a business meeting in progress. You receive the current notes and the
-        transcript lines since they were last updated. Return the updated notes as JSON:
+        You keep the notes for a business meeting in progress, and you watch it the way an expert facilitator
+        would. You receive the current notes and the transcript lines since they were last updated. Return JSON:
 
         {
           "summary": "3-6 sentences on what has been discussed so far, most recent topic last",
@@ -23,16 +29,26 @@ public sealed class MeetingScribe
           "actions": [{"owner": "person's name as spoken", "task": "what they will do", "due": "date/time if stated, else null"}],
           "open_questions": ["questions raised and not yet answered"],
           "tracked": {"<category>": ["item"]},
-          "covered": ["checklist items that were dealt with in these lines"]
+          "covered": ["checklist items that were dealt with in these lines"],
+          "insights": [{"kind": "risk|alignment|facilitation|pace", "severity": "high|medium|info", "title": "3-6 words", "text": "one or two sentences"}],
+          "lookup": "one question to look up in the organisation's Microsoft 365 data (mail, files, meetings, chats) that would genuinely help this discussion right now, or null",
+          "skill_shift": "the name of an AVAILABLE SKILL that the conversation has clearly moved into, or null"
         }
 
         Rules:
         - Only record a decision if people agreed to it, not if it was merely proposed.
         - Only record an action if a specific person took it on or was assigned it. Use their name as it
-          appears in the transcript. Never invent owners or dates.
+          appears in the transcript. Never invent owners or dates. Lines marked (in chat) count too.
         - Keep previous decisions and actions unless the transcript explicitly reverses them.
         - "tracked" uses only the categories given under SPECIALIST TRACKING, and only new items from these lines.
           "covered" uses only the wording given under CHECKLIST. Omit both when none are given.
+        - "insights" are only for things worth a facilitator's attention in THESE lines: a risk or dependency
+          nobody owns, people disagreeing or talking past each other (alignment), a decision being avoided,
+          a topic going round in circles, someone not heard from, too much detail for this forum (pace).
+          Usually zero or one. Never restate the notes. Never more than two.
+        - "lookup" only when a fact, document, prior decision or commitment from outside this meeting would
+          change the discussion (for example "what did we agree with the steel supplier about lead times").
+          Otherwise null. Never ask about the meeting itself.
         - Lines marked [agent] are the AI facilitator; do not credit it with decisions.
         - Be terse. These notes are read aloud and posted to chat.
         """;
@@ -49,24 +65,31 @@ public sealed class MeetingScribe
     }
 
     /// <summary>Folds any new turns into the notes. A no-op when nothing has been said since the last pass.</summary>
-    public async Task UpdateAsync(MeetingContext meeting, CancellationToken cancellationToken)
+    public async Task<ScribeOutcome> UpdateAsync(
+        MeetingContext meeting,
+        CancellationToken cancellationToken,
+        IReadOnlyList<MeetingSkill>? availableSkills = null)
     {
         (IReadOnlyList<TranscriptTurn> turns, int through) = meeting.TakeUnscribedTurns();
         if (turns.Count == 0)
         {
-            return;
+            return ScribeOutcome.None;
         }
 
         MeetingNotes current = meeting.SnapshotNotes();
         IReadOnlyList<MeetingSkill> skills = meeting.ActiveSkills;
         string categories = string.Join(", ", skills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));
         string checklist = string.Join("; ", meeting.UncoveredChecklist);
+        string inactive = string.Join("; ", (availableSkills ?? [])
+            .Where(a => !skills.Any(s => s.Name.Equals(a.Name, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => $"{a.Name}: {a.Description}"));
         string user = $"""
             CURRENT NOTES:
             {RenderNotesForModel(current)}
 
             SPECIALIST TRACKING: {(categories.Length > 0 ? categories : "(none)")}
             CHECKLIST: {(checklist.Length > 0 ? checklist : "(none)")}
+            AVAILABLE SKILLS: {(inactive.Length > 0 ? inactive : "(none)")}
 
             NEW TRANSCRIPT LINES:
             {RenderTurns(turns)}
@@ -78,8 +101,30 @@ public sealed class MeetingScribe
 
         if (result is null)
         {
-            return;
+            return ScribeOutcome.None;
         }
+
+        if (result["insights"] is JsonArray insights)
+        {
+            foreach (JsonNode? node in insights.Take(2))
+            {
+                string? title = node?["title"]?.GetValue<string>();
+                string? text = node?["text"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(title) && !string.IsNullOrWhiteSpace(text))
+                {
+                    meeting.AddInsight(new MeetingInsight(
+                        node?["kind"]?.GetValue<string>() ?? "facilitation",
+                        node?["severity"]?.GetValue<string>() ?? "info",
+                        title,
+                        text,
+                        null,
+                        DateTimeOffset.UtcNow));
+                }
+            }
+        }
+
+        string? lookup = result["lookup"] is JsonValue lv && lv.TryGetValue(out string? q) && !string.IsNullOrWhiteSpace(q) ? q : null;
+        string? shift = result["skill_shift"] is JsonValue sv && sv.TryGetValue(out string? n) && !string.IsNullOrWhiteSpace(n) ? n : null;
 
         HashSet<string> allowed = new(skills.SelectMany(s => s.Track), StringComparer.OrdinalIgnoreCase);
         if (result["tracked"] is JsonObject tracked)
@@ -128,6 +173,7 @@ public sealed class MeetingScribe
             decisions.Count,
             actions.Count,
             questions.Count);
+        return new ScribeOutcome(lookup, shift);
     }
 
     private const string ReportPrompt = """
@@ -167,6 +213,7 @@ public sealed class MeetingScribe
             SPECIALISMS (frame the insights through these lenses):
             {(specialism.Length > 0 ? specialism : "(general meeting)")}
             NOT COVERED: {string.Join("; ", meeting.UncoveredChecklist)}
+            LIVE INSIGHTS RAISED DURING THE MEETING: {string.Join("; ", meeting.Insights.Select(i => $"[{i.Kind}] {i.Title}: {i.Text}"))}
 
             RUNNING NOTES:
             {RenderNotesForModel(notes)}
@@ -275,6 +322,29 @@ public sealed class MeetingScribe
             foreach (string p in parked)
             {
                 md.Append("- ").AppendLine(p);
+            }
+
+            md.AppendLine();
+        }
+
+        foreach (VisualNote v in meeting.Visuals)
+        {
+            md.Append("**Captured: ").Append(v.Title).Append("** _(").Append(v.Source).Append(")_  \n").AppendLine(v.Summary).AppendLine();
+        }
+
+        IReadOnlyList<MeetingInsight> insights = meeting.Insights;
+        if (insights.Count > 0)
+        {
+            md.AppendLine("**Insights**");
+            foreach (MeetingInsight i in insights.TakeLast(6))
+            {
+                md.Append("- ").Append(i.Title).Append(": ").Append(i.Text);
+                if (i.Citation is not null)
+                {
+                    md.Append(" _(").Append(i.Citation).Append(")_");
+                }
+
+                md.AppendLine();
             }
 
             md.AppendLine();

@@ -66,16 +66,40 @@ public sealed class MeetingMailer
             return 0;
         }
 
+        // Graph caps a sendMail request at about 4 MB, and base64 adds a third. Images beyond the budget
+        // are described in text only.
+        const int imageBudgetBytes = 2_500_000;
+        int used = 0;
+        List<int> inlined = [];
+        IReadOnlyList<VisualNote> allVisuals = meeting.Visuals;
+        for (int i = 0; i < allVisuals.Count; i++)
+        {
+            if (used + allVisuals[i].Jpeg.Length <= imageBudgetBytes)
+            {
+                used += allVisuals[i].Jpeg.Length;
+                inlined.Add(i);
+            }
+        }
+
         string subject = $"Meeting recap: {meeting.Subject ?? $"Teams meeting {meeting.JoinedAt.ToLocalTime():d MMM HH:mm}"}";
         JsonObject message = new()
         {
             ["message"] = new JsonObject
             {
                 ["subject"] = subject,
-                ["body"] = new JsonObject { ["contentType"] = "HTML", ["content"] = RenderHtml(meeting, report, agentName) },
+                ["body"] = new JsonObject { ["contentType"] = "HTML", ["content"] = RenderHtml(meeting, report, agentName, inlined) },
                 ["toRecipients"] = new JsonArray([.. recipients.Select(r => (JsonNode)new JsonObject
                 {
                     ["emailAddress"] = new JsonObject { ["name"] = r.Name, ["address"] = r.Address },
+                })]),
+                ["attachments"] = new JsonArray([.. inlined.Select(i => (JsonNode)new JsonObject
+                {
+                    ["@odata.type"] = "#microsoft.graph.fileAttachment",
+                    ["name"] = $"capture-{i + 1}.jpg",
+                    ["contentType"] = "image/jpeg",
+                    ["contentId"] = $"capture{i + 1}",
+                    ["isInline"] = true,
+                    ["contentBytes"] = Convert.ToBase64String(allVisuals[i].Jpeg),
                 })]),
             },
             ["saveToSentItems"] = true,
@@ -122,7 +146,7 @@ public sealed class MeetingMailer
             : (user?["displayName"]?.GetValue<string>() ?? address, address);
     }
 
-    private static string RenderHtml(MeetingContext meeting, MeetingReport report, string agentName)
+    private static string RenderHtml(MeetingContext meeting, MeetingReport report, string agentName, IReadOnlyList<int> inlinedImages)
     {
         static string E(string? s) => WebUtility.HtmlEncode(s ?? string.Empty);
 
@@ -161,6 +185,40 @@ public sealed class MeetingMailer
         }
 
         List(h, "Not covered this time", meeting.UncoveredChecklist);
+        List(h, "Surfaced live during the meeting", [.. meeting.Insights.Select(i =>
+            $"{i.Title}: {i.Text}{(i.Citation is null ? string.Empty : $" ({i.Citation})")}")]);
+
+        IReadOnlyList<VisualNote> visuals = meeting.Visuals;
+        if (visuals.Count > 0)
+        {
+            h.Append("<h3 style=\"margin:20px 0 6px\">Captured in the meeting</h3>");
+            for (int i = 0; i < visuals.Count; i++)
+            {
+                VisualNote v = visuals[i];
+                h.Append("<div style=\"margin:0 0 18px\"><b>").Append(E(v.Title)).Append("</b> <span style=\"color:#616161\">(")
+                    .Append(E(v.Source)).Append(v.CapturedFrom is null ? string.Empty : ", " + E(v.CapturedFrom)).Append(", ")
+                    .Append(E(v.At.ToLocalTime().ToString("HH:mm"))).Append(")</span><br>");
+                if (inlinedImages.Contains(i))
+                {
+                    h.Append("<img src=\"cid:capture").Append(i + 1).Append("\" alt=\"").Append(E(v.Title))
+                        .Append("\" style=\"max-width:560px;width:100%;border:1px solid #e1dfdd;border-radius:6px;margin:6px 0\"><br>");
+                }
+
+                h.Append(E(v.Summary));
+                if (v.KeyPoints.Count > 0)
+                {
+                    h.Append("<ul style=\"margin:4px 0 0;padding-left:20px\">");
+                    foreach (string p in v.KeyPoints)
+                    {
+                        h.Append("<li>").Append(E(p)).Append("</li>");
+                    }
+
+                    h.Append("</ul>");
+                }
+
+                h.Append("</div>");
+            }
+        }
         Section(h, "Next steps", report.NextSteps);
 
         if (report.TalkTime.Count > 1)

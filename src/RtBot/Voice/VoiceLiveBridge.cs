@@ -22,9 +22,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     private static readonly TimeSpan MaxWaitForGap = TimeSpan.FromSeconds(8);
 
     // Longer than Work IQ's normal 10-15 s, short enough that the meeting isn't left waiting.
-    // Work IQ answers in 15-35 s, and a capture can spend 18 s waiting for frames before vision
+    // Work IQ answers in 7-40 s, and a capture can spend 18 s waiting for frames before vision
     // runs. Tools run off the receive loop, so a long wait costs no audio.
-    private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(60);
 
     private readonly VoiceOptions _options;
     private readonly VoiceLiveClient _client;
@@ -370,7 +370,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
            When the group agrees something, call record_decision.
          - Questions about the meeting itself (who said what, what was agreed, time left) are answered from get_meeting_status.
          - Questions needing organisation data (mail, calendar, files, chats, people, documents) use the workiq tools.
-           Answer from tool results, never from memory. If a tool returns nothing useful, say so plainly.
+           Prefer workiq_retrieve first for fast searches across mail, files and meetings; use workiq_ask only when
+           retrieve finds nothing or cross-thread synthesis is needed. Answer from tool results, never from memory.
+           If a tool returns nothing useful, say so plainly.
          - When someone refers to something on screen or holds something up to their camera, use look_at.
            When asked to capture, snap or remember a diagram, whiteboard, sketch or slide, use capture_visual,
            then say in one or two sentences what you captured.

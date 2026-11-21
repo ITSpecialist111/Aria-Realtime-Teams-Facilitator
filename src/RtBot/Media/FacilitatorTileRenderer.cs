@@ -48,11 +48,17 @@ public sealed record TileState(
     string? Specialism = null,
     TileView View = TileView.Overview,
     VisualNote? Capture = null,
-    IReadOnlyList<MeetingInsight>? Insights = null);
+    IReadOnlyList<MeetingInsight>? Insights = null,
+    int? Alignment = null,
+    string? AlignmentNote = null,
+    IReadOnlyList<int>? AlignmentTrend = null,
+    IReadOnlyList<(string Name, double Share)>? Voices = null,
+    string? Searching = null,
+    IReadOnlyList<ActiveSkillBadge>? Skills = null);
 
 /// <summary>
-/// Draws Aria's video tile: presence orb and meeting clock across the top, a caption strip, and
-/// summary cards of what she has picked up, or one list in full when someone asks for it.
+/// Draws Aria's video tile: a calm, modern slate HUD with a slim meeting bar, active skill pills,
+/// a live intelligence feed (Work IQ, specialist skills, risks) and structured outcomes.
 /// </summary>
 /// <remarks>
 /// Rendered with GDI+ into one reused BGRA bitmap and converted to NV12, the raw format the media
@@ -60,15 +66,25 @@ public sealed record TileState(
 /// </remarks>
 public sealed class FacilitatorTileRenderer : IDisposable
 {
-    private static readonly Color Background1 = Color.FromArgb(14, 14, 34);
-    private static readonly Color Background2 = Color.FromArgb(32, 26, 82);
-    private static readonly Color Muted = Color.FromArgb(160, 164, 196);
+    private static readonly Color CanvasTop = Color.FromArgb(10, 14, 23);
+    private static readonly Color CanvasBottom = Color.FromArgb(15, 21, 34);
+    private static readonly Color Surface = Color.FromArgb(19, 26, 41);
+    private static readonly Color SurfaceSubtle = Color.FromArgb(25, 34, 53);
+    private static readonly Color Hairline = Color.FromArgb(24, 255, 255, 255);
+    private static readonly Color Ink = Color.FromArgb(248, 250, 252);
+    private static readonly Color BodyInk = Color.FromArgb(203, 213, 225);
+    private static readonly Color Muted = Color.FromArgb(148, 163, 184);
+    private static readonly Color Dim = Color.FromArgb(100, 116, 139);
+
+    private static readonly Color WorkIqTone = Color.FromArgb(56, 189, 248);
+    private static readonly Color SkillTone = Color.FromArgb(167, 139, 250);
     private static readonly Color Ok = Color.FromArgb(52, 211, 153);
     private static readonly Color Warn = Color.FromArgb(251, 191, 36);
-    private static readonly Color Over = Color.FromArgb(248, 113, 113);
+    private static readonly Color Over = Color.FromArgb(251, 113, 133);
     private static readonly Color DecisionTone = Color.FromArgb(96, 165, 250);
     private static readonly Color ActionTone = Color.FromArgb(52, 211, 153);
-    private static readonly Color TrackedTone = Color.FromArgb(244, 114, 182);
+    private static readonly Color TrackedTone = Color.FromArgb(167, 139, 250);
+    private static readonly Color InsightTone = Color.FromArgb(129, 140, 248);
 
     // Typographic formats add no padding, so text measured for a box fits it exactly.
     private static readonly StringFormat RightAligned = new(StringFormat.GenericTypographic) { Alignment = StringAlignment.Far };
@@ -76,16 +92,17 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
     private readonly Bitmap _bitmap;
     private readonly Graphics _g;
-    private readonly Font _title;
-    private readonly Font _name;
+    private readonly Font _h1;
+    private readonly Font _h2;
+    private readonly Font _cardTitle;
     private readonly Font _body;
-    private readonly Font _item;
     private readonly Font _small;
-    private readonly Font _big;
-    private readonly Font _count;
-    private readonly Font _label;
+    private readonly Font _micro;
+    private readonly Font _clock;
+    private readonly Font _metric;
     private readonly Font _caption;
     private readonly byte[] _nv12;
+    private double _t;
 
     public FacilitatorTileRenderer(int width, int height)
     {
@@ -98,15 +115,15 @@ public sealed class FacilitatorTileRenderer : IDisposable
         _g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         _g.ScaleTransform(width / 1280f, height / 720f);
 
-        _title = new Font("Segoe UI Semibold", 26, GraphicsUnit.Pixel);
-        _name = new Font("Segoe UI Semibold", 34, GraphicsUnit.Pixel);
-        _body = new Font("Segoe UI", 21, GraphicsUnit.Pixel);
-        _item = new Font("Segoe UI", 19, GraphicsUnit.Pixel);
-        _small = new Font("Segoe UI", 16, GraphicsUnit.Pixel);
-        _big = new Font("Segoe UI Light", 50, GraphicsUnit.Pixel);
-        _count = new Font("Segoe UI Semibold", 36, GraphicsUnit.Pixel);
-        _label = new Font("Segoe UI Semibold", 15, GraphicsUnit.Pixel);
-        _caption = new Font("Segoe UI", 21, FontStyle.Italic, GraphicsUnit.Pixel);
+        _h1 = new Font("Segoe UI Semibold", 24, GraphicsUnit.Pixel);
+        _h2 = new Font("Segoe UI Semibold", 20, GraphicsUnit.Pixel);
+        _cardTitle = new Font("Segoe UI Semibold", 18, GraphicsUnit.Pixel);
+        _body = new Font("Segoe UI", 16.5f, GraphicsUnit.Pixel);
+        _small = new Font("Segoe UI", 14.5f, GraphicsUnit.Pixel);
+        _micro = new Font("Segoe UI Semibold", 12.5f, GraphicsUnit.Pixel);
+        _clock = new Font("Segoe UI Semibold", 25, GraphicsUnit.Pixel);
+        _metric = new Font("Segoe UI Semibold", 16, GraphicsUnit.Pixel);
+        _caption = new Font("Segoe UI", 16.5f, FontStyle.Italic, GraphicsUnit.Pixel);
         _nv12 = new byte[width * height * 3 / 2];
     }
 
@@ -117,22 +134,23 @@ public sealed class FacilitatorTileRenderer : IDisposable
     /// <summary>NV12 bytes for the frame, valid until the next call.</summary>
     public byte[] Render(TileState s, double seconds)
     {
-        using (LinearGradientBrush bg = new(new Rectangle(0, 0, 1280, 720), Background1, Background2, 70f))
+        _t = seconds;
+        using (LinearGradientBrush bg = new(new Rectangle(0, 0, 1280, 720), CanvasTop, CanvasBottom, 90f))
         {
             _g.FillRectangle(bg, 0, 0, 1280, 720);
         }
 
-        DrawPresence(s, seconds);
+        DrawTopBar(s, seconds);
+        DrawSkillsAndPulse(s);
 
         if (s.View == TileView.Overview)
         {
-            DrawHeader(s);
-            DrawCaption(s, 340);
-            DrawCards(s);
+            DrawIntelligenceFeed(s);
+            DrawOutcomesColumn(s);
         }
         else if (s.View == TileView.Capture && s.Capture is { } capture)
         {
-            DrawCapture(s, capture);
+            DrawCapture(capture);
         }
         else
         {
@@ -142,17 +160,473 @@ public sealed class FacilitatorTileRenderer : IDisposable
         return ToNv12();
     }
 
+    // ---- Zone 1: Slim top bar (y = 18..84) ----------------------------------------------
+
+    private void DrawTopBar(TileState s, double t)
+    {
+        const float x = 24, y = 18, w = 1232, h = 66;
+        CardBox(Surface, Hairline, x, y, w, h, 16);
+
+        // Compact animated presence indicator on the left.
+        const float cx = 56, cy = 51, r = 15;
+        Color presenceTone = Tone(s.Presence);
+        double pulse = 0.5 + (0.5 * Math.Sin(t * (s.Presence == AgentPresence.Speaking ? 6.0 : 2.2)));
+        float halo = r + 3 + (float)(pulse * 5);
+        using (SolidBrush glow = new(Color.FromArgb((int)(42 * (1 - (pulse * 0.5))), presenceTone)))
+        {
+            _g.FillEllipse(glow, cx - halo, cy - halo, halo * 2, halo * 2);
+        }
+
+        using (SolidBrush core = new(Color.FromArgb(45, presenceTone)))
+        {
+            _g.FillEllipse(core, cx - r, cy - r, r * 2, r * 2);
+        }
+
+        using (Pen ring = new(Color.FromArgb(190, presenceTone), 1.6f))
+        {
+            _g.DrawEllipse(ring, cx - r, cy - r, r * 2, r * 2);
+        }
+
+        if (s.Presence == AgentPresence.Speaking)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                double amp = 0.35 + (0.65 * Math.Abs(Math.Sin((t * 8.0) + (i * 1.2))));
+                float bh = (float)(6 + (amp * 13));
+                FillRounded(Ink, cx - 7.5f + (i * 6f), cy - (bh / 2), 3f, bh, 1.5f);
+            }
+        }
+        else if (s.Presence == AgentPresence.Thinking)
+        {
+            using Pen spin = new(Ink, 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            _g.DrawArc(spin, cx - 8, cy - 8, 16, 16, (float)(t * 280 % 360), 110);
+        }
+        else
+        {
+            using SolidBrush dot = new(presenceTone);
+            _g.FillEllipse(dot, cx - 4.5f, cy - 4.5f, 9f, 9f);
+        }
+
+        // Agent name + status pill + meeting title.
+        Text(s.AgentName, _h2, Ink, new RectangleF(84, y + 19, 120, 28), null);
+        float nameW = Measure(s.AgentName, _h2);
+        string stateLabel = s.Searching is not null ? "Searching M365" : s.Presence switch
+        {
+            AgentPresence.Speaking => "Speaking",
+            AgentPresence.Thinking => "Thinking",
+            AgentPresence.Listening => "Listening",
+            _ => "Live",
+        };
+        Color stateTone = s.Searching is not null ? WorkIqTone : presenceTone;
+        float pillX = 84 + nameW + 10;
+        float stateW = SoftPill(stateLabel, stateTone, pillX, y + 21);
+
+        float sepX = pillX + stateW + 14;
+        using (Pen sep = new(Hairline, 1f))
+        {
+            _g.DrawLine(sep, sepX, y + 20, sepX, y + h - 20);
+        }
+
+        // Right cluster: clock + agenda item pill + optional timer.
+        const float clockRight = x + w - 22;
+        string clockStr = Clock(s.Elapsed);
+        Text(clockStr, _clock, Ink, new RectangleF(clockRight - 130, y + 10, 130, 30), RightAligned);
+
+        string remLabel = "elapsed";
+        Color remTone = Muted;
+        if (s.Remaining is { } left)
+        {
+            bool over = left < TimeSpan.Zero;
+            remLabel = over ? $"+{Minutes(-left)} over" : $"{Minutes(left)} left";
+            remTone = over ? Over : left.TotalMinutes <= 5 ? Warn : Muted;
+        }
+
+        Text(remLabel, _micro, remTone, new RectangleF(clockRight - 140, y + 41, 140, 18), RightAligned);
+
+        float rightCursor = clockRight - 132;
+        if (s.Agenda.Current is { } current)
+        {
+            string timebox = string.Empty;
+            Color agendaTone = Ok;
+            if (current.Minutes is { } m && m > 0 && s.Agenda.CurrentRemaining is { } ar)
+            {
+                bool over = ar < TimeSpan.Zero;
+                double used = s.Agenda.CurrentElapsed.TotalMinutes / m;
+                agendaTone = over ? Over : used >= 0.75 ? Warn : Ok;
+                timebox = over ? $" \u00B7 +{Clock(-ar)}" : $" \u00B7 {Clock(ar)}";
+            }
+
+            float maxAgendaTitle = s.Timer is not null ? 130 : 185;
+            string agendaText = $"{s.Agenda.CurrentIndex + 1}/{s.Agenda.Items.Count}  {Ellipsize(current.Title, _small, maxAgendaTitle)}{timebox}";
+            float aw = Measure(agendaText, _small) + 34;
+            float ax = rightCursor - aw;
+            CardBox(SurfaceSubtle, Hairline, ax, y + 17, aw, 32, 16);
+            using (SolidBrush d = new(agendaTone))
+            {
+                _g.FillEllipse(d, ax + 12, y + 29, 8, 8);
+            }
+
+            Text(agendaText, _small, BodyInk, new RectangleF(ax + 25, y + 23, aw - 30, 22), null);
+            rightCursor = ax - 10;
+        }
+
+        if (s.Timer is { } timer)
+        {
+            TimeSpan tr = timer.EndsAt - DateTimeOffset.UtcNow;
+            string timerText = $"{Ellipsize(timer.Label, _small, 110)} {Clock(tr < TimeSpan.Zero ? TimeSpan.Zero : tr)}";
+            float tw = SoftPill(timerText, Warn, 0, -100, measureOnly: true);
+            SoftPill(timerText, Warn, rightCursor - tw, y + 21);
+            rightCursor -= tw + 10;
+        }
+
+        float subjX = sepX + 14;
+        float subjW = Math.Max(140, rightCursor - subjX - 12);
+        Text(Ellipsize(s.Subject ?? "Teams meeting", _h2, subjW), _h2, Ink, new RectangleF(subjX, y + 19, subjW, 28), null);
+
+        // Subtle 2px progress line along the bottom of the top bar.
+        if (s.Agenda.Current?.Minutes is { } mins && mins > 0)
+        {
+            double frac = Math.Clamp(s.Agenda.CurrentElapsed.TotalMinutes / mins, 0, 1);
+            Color barTone = s.Agenda.CurrentRemaining is { } rem && rem < TimeSpan.Zero ? Over : frac >= 0.75 ? Warn : Ok;
+            FillRounded(barTone, x + 16, y + h - 3, (float)((w - 32) * frac), 2.5f, 1.2f);
+        }
+        else if (s.ScheduledLength is { TotalSeconds: > 0 } len)
+        {
+            double frac = Math.Clamp(s.Elapsed.TotalSeconds / len.TotalSeconds, 0, 1);
+            Color barTone = s.Remaining is { } rem && rem < TimeSpan.Zero ? Over : frac >= 0.85 ? Warn : DecisionTone;
+            FillRounded(barTone, x + 16, y + h - 3, (float)((w - 32) * frac), 2.5f, 1.2f);
+        }
+    }
+
+    // ---- Zone 2: Active skills strip + room pulse pills (y = 96..134) -------------------
+
+    private void DrawSkillsAndPulse(TileState s)
+    {
+        const float y = 96;
+        float rightEdge = 1256;
+
+        // Right-aligned room pulse pills first so we know where the skill strip stops.
+        if (s.Restricted)
+        {
+            float rw = SoftPill("External guest \u00B7 M365 off", Warn, 0, -100, measureOnly: true);
+            SoftPill("External guest \u00B7 M365 off", Warn, rightEdge - rw, y + 4);
+            rightEdge -= rw + 10;
+        }
+
+        // Voices pill.
+        IReadOnlyList<(string Name, double Share)> voices = s.Voices ?? [];
+        string voiceText = voices.Count == 0
+            ? $"{s.People} in call"
+            : string.Join(" \u00B7 ", voices.Take(2).Select(v => $"{ShortName(v.Name)} {v.Share * 100:0}%"));
+        float vw = Measure(voiceText, _micro) + 24;
+        CardBox(Surface, Hairline, rightEdge - vw, y + 2, vw, 32, 16);
+        Text(voiceText, _micro, Muted, new RectangleF(rightEdge - vw + 12, y + 9, vw - 20, 18), null);
+        rightEdge -= vw + 8;
+
+        // Alignment pill with inline micro-bar.
+        int? align = s.Alignment;
+        Color alignTone = align is not { } av ? Muted : av >= 75 ? Ok : av >= 50 ? Warn : Over;
+        string alignLabel = align is { } ap ? $"Alignment {ap}%" : "Alignment \u2014";
+        float alw = Measure(alignLabel, _micro) + (align.HasValue ? 64 : 26);
+        float alx = rightEdge - alw;
+        CardBox(Surface, Hairline, alx, y + 2, alw, 32, 16);
+        using (SolidBrush dot = new(alignTone))
+        {
+            _g.FillEllipse(dot, alx + 11, y + 14.5f, 7, 7);
+        }
+
+        Text(alignLabel, _micro, Ink, new RectangleF(alx + 22, y + 9, alw - 26, 18), null);
+        if (align is { } pct)
+        {
+            Bar(alx + alw - 44, y + 15, 32, 6, pct / 100.0, alignTone);
+        }
+
+        rightEdge = alx - 12;
+
+        // Left: Active specialist skill badges (newest dynamic activations stand out).
+        Text("SKILLS", _micro, Dim, new RectangleF(28, y + 9, 58, 18), null);
+        float sx = 82;
+
+        List<(string Label, bool Dynamic, bool Fresh)> badges = [];
+        if (s.Skills is { Count: > 0 } richSkills)
+        {
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            foreach (ActiveSkillBadge b in richSkills)
+            {
+                bool fresh = b.Dynamic && (now - b.ActivatedAt).TotalSeconds <= 90;
+                badges.Add((b.Label, b.Dynamic, fresh));
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(s.Specialism))
+        {
+            foreach (string part in s.Specialism.Split('\u00B7', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                badges.Add((part, false, false));
+            }
+        }
+
+        if (badges.Count == 0)
+        {
+            Text("Watching conversation for specialist domains\u2026", _small, Dim, new RectangleF(sx, y + 8, rightEdge - sx, 20), null);
+            return;
+        }
+
+        foreach ((string label, bool dynamic, bool fresh) in badges)
+        {
+            string display = dynamic ? $"\u2726 {label}" : label;
+            float pw = Measure(display, _micro) + (dynamic ? 22 : 28);
+            if (sx + pw > rightEdge)
+            {
+                int hidden = badges.Count - badges.FindIndex(b => b.Label == label);
+                if (hidden > 0 && sx + 44 <= rightEdge)
+                {
+                    CardBox(Surface, Hairline, sx, y + 2, 40, 32, 16);
+                    Text($"+{hidden}", _micro, Muted, new RectangleF(sx, y + 9, 40, 18), Centred);
+                }
+
+                break;
+            }
+
+            Color fill = fresh ? Color.FromArgb(48, SkillTone) : Surface;
+            Color border = fresh ? Color.FromArgb(165, SkillTone) : Color.FromArgb(60, SkillTone);
+            CardBox(fill, border, sx, y + 2, pw, 32, 16);
+            if (!dynamic)
+            {
+                using SolidBrush bDot = new(SkillTone);
+                _g.FillEllipse(bDot, sx + 11, y + 14.5f, 6.5f, 6.5f);
+            }
+
+            float tx = dynamic ? sx + 11 : sx + 22;
+            Text(display, _micro, fresh ? Ink : BodyInk, new RectangleF(tx, y + 9, pw - (tx - sx) - 8, 18), null);
+            sx += pw + 7;
+        }
+    }
+
+    // ---- Zone 3A: Live Intelligence feed (left primary panel, x = 24..800) --------------
+
+    private void DrawIntelligenceFeed(TileState s)
+    {
+        const float x = 24, y = 144, w = 776, h = 554;
+        CardBox(Surface, Hairline, x, y, w, h, 18);
+
+        IReadOnlyList<MeetingInsight> insights = s.Insights ?? [];
+        Text("LIVE INTELLIGENCE", _micro, Dim, new RectangleF(x + 22, y + 16, 220, 18), null);
+        Text("Skills, risks & Work IQ evidence", _small, Muted, new RectangleF(x + 168, y + 14, 340, 20), null);
+        if (insights.Count > 0)
+        {
+            Text($"{insights.Count}", _metric, Muted, new RectangleF(x + w - 80, y + 14, 58, 22), RightAligned);
+        }
+
+        using (Pen sep = new(Hairline, 1f))
+        {
+            _g.DrawLine(sep, x + 20, y + 44, x + w - 20, y + 44);
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        double captionAge = s.CaptionAt is { } capAt ? (now - capAt).TotalSeconds : double.MaxValue;
+        bool hasCaption = !string.IsNullOrWhiteSpace(s.Caption) && captionAge is >= 0 and < 20;
+        float bottom = hasCaption ? y + h - 56 : y + h - 14;
+        float iy = y + 56;
+        bool any = false;
+
+        if (s.Searching is { } query)
+        {
+            string dots = new('.', 1 + ((int)(_t * 2) % 3));
+            const float sh = 46;
+            CardBox(Color.FromArgb(26, WorkIqTone), Color.FromArgb(95, WorkIqTone), x + 18, iy, w - 36, sh, 12);
+            float cw = TagPill("WORK IQ", WorkIqTone, x + 30, iy + 12);
+            string qText = $"Searching M365{dots}  {query}";
+            Text(Ellipsize(qText, _small, w - 66 - cw), _small, Ink, new RectangleF(x + 38 + cw, iy + 13, w - 66 - cw, 22), null);
+            iy += sh + 10;
+            any = true;
+        }
+
+        foreach (MeetingInsight insight in insights.Reverse())
+        {
+            bool showSource = !string.IsNullOrWhiteSpace(insight.Citation) && !insight.Kind.Equals("skill", StringComparison.OrdinalIgnoreCase);
+            List<string> lines = Wrap(insight.Text, _body, w - 72, 2);
+            float ch = 36 + (lines.Count * 22) + (showSource ? 21 : 0) + 12;
+            if (iy + ch > bottom)
+            {
+                break;
+            }
+
+            Color tone = KindTone(insight.Kind);
+            CardBox(SurfaceSubtle, Hairline, x + 18, iy, w - 36, ch, 12);
+            FillRounded(tone, x + 18, iy + 10, 3.5f, ch - 20, 2f);
+
+            string badge = insight.Kind.Equals("skill", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(insight.Citation)
+                ? $"SKILL \u00B7 {insight.Citation.ToUpperInvariant()}"
+                : ChipLabel(insight.Kind);
+            float bw = TagPill(badge, tone, x + 32, iy + 10);
+
+            float highReserve = insight.Severity == "high" ? 64 : 0;
+            float titleW = w - 68 - bw - highReserve;
+            Text(Ellipsize(insight.Title, _cardTitle, titleW), _cardTitle, Ink, new RectangleF(x + 40 + bw, iy + 9, titleW, 24), null);
+
+            if (insight.Severity == "high")
+            {
+                TagPill("HIGH", Over, x + w - 78, iy + 10);
+            }
+
+            float ly = iy + 37;
+            foreach (string line in lines)
+            {
+                Text(line, _body, BodyInk, new RectangleF(x + 32, ly, w - 68, 22), null);
+                ly += 22;
+            }
+
+            if (showSource)
+            {
+                Text(Ellipsize(insight.Citation!, _small, w - 68), _small, Muted, new RectangleF(x + 32, ly + 2, w - 68, 20), null);
+            }
+
+            iy += ch + 10;
+            any = true;
+        }
+
+        if (!any)
+        {
+            float ey = y + 180;
+            Text("Listening to the conversation", _h2, Ink, new RectangleF(x + 40, ey, w - 80, 28), Centred);
+            Text("Specialist skills activate automatically as topics shift, and relevant Microsoft 365 playbooks or policies appear here via Work IQ.", _body, Muted, new RectangleF(x + 80, ey + 34, w - 160, 56), Centred);
+        }
+
+        if (hasCaption)
+        {
+            int alpha = Math.Clamp(captionAge < 16 ? 255 : (int)(255 * (20 - captionAge) / 4), 0, 255);
+            float cy = y + h - 46;
+            CardBox(Color.FromArgb(alpha * 220 / 255, 11, 16, 27), Color.FromArgb(alpha * 50 / 255, SkillTone), x + 18, cy, w - 36, 34, 10);
+            string spoken = $"{s.AgentName}: \u201C{s.Caption!.Trim()}\u201D";
+            Text(Ellipsize(spoken, _caption, w - 64), _caption, Color.FromArgb(alpha, Ink), new RectangleF(x + 32, cy + 6, w - 64, 22), null);
+        }
+    }
+
+    // ---- Zone 3B: Unified Outcomes column (right panel, x = 816..1256) ------------------
+
+    private void DrawOutcomesColumn(TileState s)
+    {
+        const float x = 816, y = 144, w = 440, h = 554;
+        CardBox(Surface, Hairline, x, y, w, h, 18);
+
+        Text("OUTCOMES", _micro, Dim, new RectangleF(x + 22, y + 16, 160, 18), null);
+        int totalOutcomes = s.Decisions.Count + s.Actions.Count;
+        Text($"{totalOutcomes} captured", _small, Muted, new RectangleF(x + w - 160, y + 14, 138, 20), RightAligned);
+
+        using (Pen sep = new(Hairline, 1f))
+        {
+            _g.DrawLine(sep, x + 20, y + 44, x + w - 20, y + 44);
+        }
+
+        // Section 1: Decisions (y = 56..196)
+        DrawOutcomeSection(
+            x + 20, y + 54, w - 40, 138,
+            "DECISIONS", s.Decisions.Count, DecisionTone,
+            [.. s.Decisions.TakeLast(2).Reverse().Select(d => (d, (string?)null))]);
+
+        using (Pen sep = new(Hairline, 1f))
+        {
+            _g.DrawLine(sep, x + 20, y + 198, x + w - 20, y + 198);
+        }
+
+        // Section 2: Actions (y = 208..384)
+        DrawOutcomeSection(
+            x + 20, y + 208, w - 40, 174,
+            "ACTIONS", s.Actions.Count, ActionTone,
+            [.. s.Actions.TakeLast(2).Reverse().Select(a => (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 " + a.Due)}"))]);
+
+        using (Pen sep = new(Hairline, 1f))
+        {
+            _g.DrawLine(sep, x + 20, y + 388, x + w - 20, y + 388);
+        }
+
+        // Section 3: Specialist Tracked (or Parking Lot)
+        int trackedCount = s.Tracked.Sum(kv => kv.Value.Count);
+        if (trackedCount > 0)
+        {
+            List<(string, string?)> tracked = [.. s.Tracked
+                .SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key)))
+                .TakeLast(2)
+                .Reverse()];
+            DrawOutcomeSection(x + 20, y + 398, w - 40, 146, "SPECIALIST TRACKING", trackedCount, TrackedTone, tracked);
+        }
+        else
+        {
+            DrawOutcomeSection(
+                x + 20, y + 398, w - 40, 146,
+                "PARKING LOT", s.Parked.Count, Warn,
+                [.. s.Parked.TakeLast(2).Reverse().Select(p => (p, (string?)null))]);
+        }
+    }
+
+    private void DrawOutcomeSection(
+        float x, float y, float w, float h,
+        string label, int count, Color tone,
+        IReadOnlyList<(string Text, string? Meta)> items)
+    {
+        using (SolidBrush dot = new(tone))
+        {
+            _g.FillEllipse(dot, x + 2, y + 5, 7, 7);
+        }
+
+        Text(label, _micro, Muted, new RectangleF(x + 15, y + 1, w - 60, 18), null);
+        Text(count.ToString(), _metric, count > 0 ? Ink : Dim, new RectangleF(x + w - 48, y - 1, 48, 20), RightAligned);
+
+        float iy = y + 26;
+        if (items.Count == 0)
+        {
+            Text("None recorded yet", _small, Dim, new RectangleF(x + 15, iy + 2, w - 20, 20), null);
+            return;
+        }
+
+        foreach ((string text, string? meta) in items)
+        {
+            if (iy + 20 > y + h)
+            {
+                return;
+            }
+
+            using (SolidBrush itemDot = new(Color.FromArgb(150, tone)))
+            {
+                _g.FillEllipse(itemDot, x + 3, iy + 8, 5, 5);
+            }
+
+            int maxLines = meta is null ? 2 : 1;
+            foreach (string line in Wrap(text, _body, w - 18, maxLines))
+            {
+                if (iy + 20 > y + h)
+                {
+                    return;
+                }
+
+                Text(line, _body, Ink, new RectangleF(x + 15, iy, w - 18, 22), null);
+                iy += 21;
+            }
+
+            if (meta is not null && iy + 18 <= y + h)
+            {
+                Text(Ellipsize(meta, _small, w - 18), _small, tone, new RectangleF(x + 15, iy, w - 18, 19), null);
+                iy += 20;
+            }
+
+            iy += 9;
+        }
+    }
+
+    // ---- Capture & Breakdown views (full width below top strips) ------------------------
+
     private Bitmap? _captureImage;
     private VisualNote? _captureFor;
 
-    private void DrawCapture(TileState s, VisualNote capture)
+    private void DrawCapture(VisualNote capture)
     {
-        const float x = 310, y = 22, w = 948, h = 676;
-        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 20);
-        FillRounded(TrackedTone, x, y + 24, 6, 44, 3);
-        Text("Captured", _label, TrackedTone, new RectangleF(x + 28, y + 20, 300, 20), null);
-        Text(Ellipsize(capture.Title, _name, w - 56), _name, Color.White, new RectangleF(x + 28, y + 38, w - 56, 46), null);
-        Text(Ellipsize($"{capture.Source}{(capture.CapturedFrom is null ? string.Empty : " \u00B7 " + capture.CapturedFrom)} \u00B7 {capture.At.ToLocalTime():HH:mm}", _small, w - 56), _small, Muted, new RectangleF(x + 28, y + 86, w - 56, 22), null);
+        const float x = 24, y = 144, w = 1232, h = 554;
+        CardBox(Surface, Hairline, x, y, w, h, 18);
+
+        TagPill("CAPTURED VISUAL", TrackedTone, x + 24, y + 18);
+        Text(Ellipsize(capture.Title, _h1, w - 240), _h1, Ink, new RectangleF(x + 180, y + 14, w - 420, 32), null);
+        string meta = $"{capture.Source}{(capture.CapturedFrom is null ? string.Empty : " \u00B7 " + capture.CapturedFrom)} \u00B7 {capture.At.ToLocalTime():HH:mm}";
+        Text(Ellipsize(meta, _small, 260), _small, Muted, new RectangleF(x + w - 284, y + 20, 260, 22), RightAligned);
 
         // Decode once per capture, not once per frame.
         if (!ReferenceEquals(_captureFor, capture))
@@ -172,20 +646,20 @@ public sealed class FacilitatorTileRenderer : IDisposable
             }
         }
 
-        const float ix = x + 28, iy = y + 124, iw = 520, ih = 520;
+        const float ix = x + 24, iy = y + 64, iw = 620, ih = 466;
+        CardBox(CanvasTop, Hairline, ix, iy, iw, ih, 12);
         if (_captureImage is { } image)
         {
-            float scale = Math.Min(iw / image.Width, ih / image.Height);
+            float scale = Math.Min((iw - 16) / image.Width, (ih - 16) / image.Height);
             float dw = image.Width * scale, dh = image.Height * scale;
-            FillRounded(Color.FromArgb(40, 0, 0, 0), ix, iy, iw, ih, 12);
             _g.DrawImage(image, ix + ((iw - dw) / 2), iy + ((ih - dh) / 2), dw, dh);
         }
 
-        float tx = ix + iw + 26, tw = x + w - 28 - tx, ty = iy;
-        foreach (string line in Wrap(capture.Summary, _item, tw, 8))
+        float tx = ix + iw + 28, tw = x + w - 28 - tx, ty = iy + 4;
+        foreach (string line in Wrap(capture.Summary, _body, tw, 6))
         {
-            Text(line, _item, Color.White, new RectangleF(tx, ty, tw, 26), null);
-            ty += 25;
+            Text(line, _body, Ink, new RectangleF(tx, ty, tw, 24), null);
+            ty += 23;
         }
 
         ty += 14;
@@ -193,257 +667,179 @@ public sealed class FacilitatorTileRenderer : IDisposable
         {
             using (SolidBrush bullet = new(TrackedTone))
             {
-                _g.FillEllipse(bullet, tx, ty + 9, 7, 7);
+                _g.FillEllipse(bullet, tx, ty + 7, 6, 6);
             }
 
             foreach (string line in Wrap(point, _small, tw - 18, 2))
             {
-                Text(line, _small, Muted, new RectangleF(tx + 16, ty, tw - 18, 22), null);
-                ty += 21;
+                Text(line, _small, BodyInk, new RectangleF(tx + 15, ty, tw - 18, 21), null);
+                ty += 20;
             }
 
             ty += 8;
-            if (ty > y + h - 40)
+            if (ty > y + h - 32)
             {
                 break;
             }
         }
     }
 
-    // ---- Presence (left column) ---------------------------------------------------------
-
-    private void DrawPresence(TileState s, double t)
+    private void DrawBreakdown(TileState s)
     {
-        const float cx = 150, cy = 120, r = 72;
-        const float k = r / 112f;
-        Color tone = Tone(s.Presence);
-
-        double speed = s.Presence == AgentPresence.Speaking ? 3.2 : 1.1;
-        for (int i = 0; i < 3; i++)
+        const float x = 24, y = 144, w = 1232, h = 554;
+        (string title, Color tone, List<(string Text, string? Meta)> items) = s.View switch
         {
-            double phase = ((t * speed / 2.5) + (i / 3.0)) % 1.0;
-            float rr = r + (float)(phase * 42);
-            using Pen ring = new(Color.FromArgb((int)(90 * (1 - phase)), tone), 2.5f);
-            _g.DrawEllipse(ring, cx - rr, cy - rr, rr * 2, rr * 2);
-        }
-
-        using (GraphicsPath orb = new())
-        {
-            orb.AddEllipse(cx - r, cy - r, r * 2, r * 2);
-            using PathGradientBrush fill = new(orb)
-            {
-                CenterColor = Lighten(tone, 0.55f),
-                SurroundColors = [Color.FromArgb(255, (int)(tone.R * 0.45), (int)(tone.G * 0.45), (int)(tone.B * 0.55))],
-                CenterPoint = new PointF(cx - (20 * k), cy - (24 * k)),
-            };
-            _g.FillPath(fill, orb);
-        }
-
-        switch (s.Presence)
-        {
-            case AgentPresence.Speaking:
-                for (int i = 0; i < 5; i++)
-                {
-                    double level = 0.35 + (0.65 * Math.Abs(Math.Sin((t * 7.5) + (i * 1.3)) * Math.Sin((t * 3.1) + i)));
-                    float h = (float)((16 + (level * 76)) * k);
-                    FillRounded(Color.FromArgb(235, 255, 255, 255), cx - (58 * k) + (i * 26 * k), cy - (h / 2), 14 * k, h, 7 * k);
-                }
-
-                break;
-
-            case AgentPresence.Thinking:
-                using (Pen arc = new(Color.FromArgb(230, 255, 255, 255), 7f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                {
-                    _g.DrawArc(arc, cx - 34, cy - 34, 68, 68, (float)(t * 300 % 360), 110);
-                }
-
-                break;
-
-            case AgentPresence.Listening:
-                for (int i = 0; i < 3; i++)
-                {
-                    double pulse = 0.5 + (0.5 * Math.Sin((t * 4) - (i * 0.9)));
-                    float d = (float)(10 + (pulse * 6));
-                    using SolidBrush dot = new(Color.FromArgb(235, 255, 255, 255));
-                    _g.FillEllipse(dot, cx - 26 + (i * 26) - (d / 2), cy - (d / 2), d, d);
-                }
-
-                break;
-
-            default:
-                using (SolidBrush glyph = new(Color.FromArgb(240, 255, 255, 255)))
-                using (StringFormat center = new() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                using (Font letter = new("Segoe UI Semibold", 60, GraphicsUnit.Pixel))
-                {
-                    _g.DrawString(s.AgentName.Length > 0 ? s.AgentName[..1].ToUpperInvariant() : "A", letter, glyph, new RectangleF(cx - r, cy - r - 3, r * 2, r * 2), center);
-                }
-
-                break;
-        }
-        Text(s.AgentName, _name, Color.White, new RectangleF(cx - 140, cy + 92, 280, 44), Centred);
-        Text(Ellipsize(s.Specialism ?? "AI meeting facilitator", _small, 270), _small, Muted, new RectangleF(cx - 140, cy + 134, 280, 22), Centred);
-
-        string status = s.Presence switch
-        {
-            AgentPresence.Listening => "Listening",
-            AgentPresence.Thinking => "Working on it",
-            AgentPresence.Speaking => "Speaking",
-            _ => $"Say \u201C{s.AgentName}\u201D",
+            TileView.Actions => ("Actions", ActionTone, s.Actions.Select(a =>
+                (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 due " + a.Due)}")).ToList()),
+            TileView.Decisions => ("Decisions", DecisionTone, s.Decisions.Select(d => (d, (string?)null)).ToList()),
+            TileView.Parked => ("Parking lot", Warn, s.Parked.Select(p => (p, (string?)null)).ToList()),
+            TileView.Tracked => ("Specialist tracking", TrackedTone, s.Tracked.SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key))).ToList()),
+            TileView.Insights => ("Live intelligence", InsightTone, (s.Insights ?? []).Select(i =>
+                ($"{i.Title} \u2014 {i.Text}", (string?)(i.Citation ?? KindLabel(i.Kind)))).ToList()),
+            _ => ("Agenda", Ok, s.Agenda.Items.Select((a, i) => (
+                $"{(s.Agenda.Completed.Contains(i) ? "\u2713 " : i == s.Agenda.CurrentIndex ? "\u25B6 " : string.Empty)}{a.Title}",
+                (string?)(a.Minutes is { } m ? $"{m:0.#} min" : null))).ToList()),
         };
 
-        SizeF size = _g.MeasureString(status, _label);
-        float pw = size.Width + 34, px = cx - (pw / 2), py = cy + 164;
-        FillRounded(Color.FromArgb(60, tone), px, py, pw, 30, 15);
-        using (SolidBrush dot = new(tone))
+        CardBox(Surface, Hairline, x, y, w, h, 18);
+        FillRounded(tone, x + 22, y + 18, 4, 28, 2);
+        Text(title, _h1, Ink, new RectangleF(x + 36, y + 15, 420, 34), null);
+        Text($"{items.Count} total", _small, Muted, new RectangleF(x + w - 200, y + 22, 176, 22), RightAligned);
+
+        using (Pen sep = new(Hairline, 1f))
         {
-            _g.FillEllipse(dot, px + 12, py + 10, 10, 10);
+            _g.DrawLine(sep, x + 22, y + 58, x + w - 22, y + 58);
         }
 
-        Text(status, _label, Color.White, new RectangleF(px + 26, py + 5, pw - 26, 22), null);
-    }
+        bool longForm = s.View == TileView.Insights;
+        int maxRows = longForm ? 5 : 9;
+        IEnumerable<(string Text, string? Meta)> shown = items.Count > maxRows ? items.Skip(items.Count - maxRows) : items;
+        int number = Math.Max(0, items.Count - maxRows);
+        float iy = y + 74;
 
-    // ---- Overview: header, caption, cards ----------------------------------------------
-
-    private void DrawHeader(TileState s)
-    {
-        const float x = 310, y = 22, w = 948, h = 300;
-        FillRounded(Color.FromArgb(22, 255, 255, 255), x, y, w, h, 20);
-
-        Text(Ellipsize(s.Subject ?? "Teams meeting", _title, w - 360), _title, Color.White, new RectangleF(x + 26, y + 18, w - 360, 34), null);
-
-        // Clock, top right of the panel.
+        if (items.Count == 0)
         {
-            Text(Clock(s.Elapsed), _big, Color.White, new RectangleF(x + w - 330, y + 4, 300, 62), RightAligned);
-            string sub = "elapsed";
-            Color tone = Muted;
-            if (s.Remaining is { } left)
-            {
-                bool over = left < TimeSpan.Zero;
-                sub = over ? $"+{Minutes(-left)} over" : $"{Minutes(left)} left";
-                tone = over ? Over : left.TotalMinutes <= 5 ? Warn : Muted;
-            }
-
-            Text(sub, _label, tone, new RectangleF(x + w - 330, y + 66, 300, 22), RightAligned);
-        }
-
-        if (s.ScheduledLength is { TotalSeconds: > 0 } length)
-        {
-            double used = Math.Clamp(s.Elapsed.TotalSeconds / length.TotalSeconds, 0, 1);
-            bool over = s.Remaining is { } r && r < TimeSpan.Zero;
-            Bar(x + 26, y + 98, w - 52, 6, used, over ? Over : used > 0.85 ? Warn : Ok);
-        }
-
-        float cy = y + 120;
-        Text("NOW", _label, Muted, new RectangleF(x + 26, cy, 100, 20), null);
-
-        if (s.Agenda.Current is { } item)
-        {
-            Text($"Item {s.Agenda.CurrentIndex + 1} of {s.Agenda.Items.Count}", _label, Muted, new RectangleF(x + w - 230, cy, 204, 20), RightAligned);
-            Text(Ellipsize(item.Title, _title, w - 52), _title, Color.White, new RectangleF(x + 26, cy + 22, w - 52, 34), null);
-
-            float by = cy + 70;
-            if (item.Minutes is { } minutes && minutes > 0)
-            {
-                double used = s.Agenda.CurrentElapsed.TotalMinutes / minutes;
-                Color tone = used >= 1 ? Over : used >= 0.75 ? Warn : Ok;
-                Bar(x + 26, by + 6, w - 260, 12, Math.Min(used, 1), tone);
-                TimeSpan rem = s.Agenda.CurrentRemaining ?? TimeSpan.Zero;
-                Text(rem >= TimeSpan.Zero ? $"{Clock(rem)} left" : $"+{Clock(-rem)} over", _body, tone, new RectangleF(x + w - 220, by - 4, 194, 30), RightAligned);
-            }
-            else
-            {
-                Text($"{Clock(s.Agenda.CurrentElapsed)} on this item", _body, Muted, new RectangleF(x + 26, by - 4, 400, 30), null);
-            }
-
-            string next = s.Agenda.Next is { } n ? $"Next: {n.Title}" : "Last item";
-            Text(Ellipsize(next, _body, w - 340), _body, Muted, new RectangleF(x + 26, by + 34, w - 340, 30), null);
-        }
-        else
-        {
-            string hint = s.Agenda.Items.Count > 0 ? "Agenda complete" : $"No agenda yet \u00B7 say \u201C{s.AgentName}, our agenda is\u2026\u201D";
-            Text(Ellipsize(hint, _body, w - 52), _body, Muted, new RectangleF(x + 26, cy + 26, w - 52, 30), null);
-        }
-
-        if (s.Timer is { } timer)
-        {
-            TimeSpan rem = timer.EndsAt - DateTimeOffset.UtcNow;
-            float tx = x + w - 300, ty = y + h - 54;
-            FillRounded(Color.FromArgb(46, Warn), tx, ty, 274, 38, 12);
-            Text(Ellipsize(timer.Label, _small, 160), _small, Color.White, new RectangleF(tx + 14, ty + 9, 160, 22), null);
-            Text(Clock(rem < TimeSpan.Zero ? TimeSpan.Zero : rem), _title, Warn, new RectangleF(tx + 150, ty + 1, 110, 34), RightAligned);
-        }
-    }
-
-    private void DrawCaption(TileState s, float y)
-    {
-        string text;
-        int alpha = 255;
-        if (!string.IsNullOrWhiteSpace(s.Caption) && s.CaptionAt is { } at && (DateTimeOffset.UtcNow - at).TotalSeconds <= 25)
-        {
-            double age = (DateTimeOffset.UtcNow - at).TotalSeconds;
-            alpha = age < 20 ? 255 : (int)(255 * (25 - age) / 5);
-            text = "\u201C" + s.Caption.Trim() + "\u201D";
-        }
-        else if (s.Restricted)
-        {
-            FillRounded(Color.FromArgb(70, Warn), 22, y, 1236, 40, 12);
-            Text("External guest present \u00B7 internal data is off", _label, Color.White, new RectangleF(22, y + 11, 1236, 22), Centred);
-            return;
-        }
-        else
-        {
-            Text($"Notes on \u00B7 {s.People} in meeting \u00B7 say \u201C{s.AgentName}, show the actions\u201D for detail", _small, Muted, new RectangleF(30, y + 10, 1220, 22), null);
+            Text("Nothing recorded yet.", _body, Muted, new RectangleF(x + 36, iy, w - 72, 26), null);
             return;
         }
 
-        FillRounded(Color.FromArgb(alpha * 110 / 255, 0, 0, 0), 22, y, 1236, 40, 12);
-        Text(Ellipsize(text, _caption, 1196), _caption, Color.FromArgb(alpha, 255, 255, 255), new RectangleF(40, y + 7, 1196, 30), null);
+        foreach ((string text, string? meta) in shown)
+        {
+            if (iy > y + h - 48)
+            {
+                break;
+            }
+
+            number++;
+            Text($"{number}.", _body, tone, new RectangleF(x + 22, iy, 32, 24), RightAligned);
+
+            if (longForm)
+            {
+                foreach (string line in Wrap(text, _body, w - 96, 2))
+                {
+                    Text(line, _body, Ink, new RectangleF(x + 64, iy, w - 96, 24), null);
+                    iy += 23;
+                }
+
+                if (meta is not null)
+                {
+                    Text(Ellipsize(meta, _small, w - 96), _small, Muted, new RectangleF(x + 64, iy + 1, w - 96, 20), null);
+                    iy += 22;
+                }
+
+                iy += 14;
+                continue;
+            }
+
+            float metaW = meta is null ? 0 : Math.Min(320, Measure(meta, _small) + 12);
+            Text(Ellipsize(text, _body, w - 96 - metaW), _body, Ink, new RectangleF(x + 64, iy, w - 96 - metaW, 24), null);
+            if (meta is not null)
+            {
+                Text(Ellipsize(meta, _small, 320), _small, tone, new RectangleF(x + w - 28 - metaW, iy + 2, metaW, 22), RightAligned);
+            }
+
+            iy += 46;
+        }
     }
 
-    private void DrawCards(TileState s)
+    // ---- Helpers & primitives -----------------------------------------------------------
+
+    private float Measure(string text, Font font) =>
+        _g.MeasureString(text, font, PointF.Empty, StringFormat.GenericTypographic).Width;
+
+    private static string ShortName(string full)
     {
-        const float y = 392, h = 306, gap = 14, w = (1236 - (3 * gap)) / 4f;
-
-        DrawCard(22, y, w, h, "Decisions", s.Decisions.Count, DecisionTone,
-            [.. s.Decisions.TakeLast(3).Reverse().Select(d => (d, (string?)null))]);
-
-        DrawCard(22 + w + gap, y, w, h, "Actions", s.Actions.Count, ActionTone,
-            [.. s.Actions.TakeLast(3).Reverse().Select(a => (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 " + a.Due)}"))]);
-
-        // Specialist tracking when a skill is active; otherwise the parking lot.
-        List<(string, string?)> tracked = [.. s.Tracked
-            .SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key)))
-            .TakeLast(3).Reverse()];
-        int trackedCount = s.Tracked.Sum(kv => kv.Value.Count);
-        if (trackedCount > 0)
-        {
-            DrawCard(22 + (2 * (w + gap)), y, w, h, "Tracked", trackedCount, TrackedTone, tracked,
-                s.Parked.Count > 0 ? $"+ {s.Parked.Count} parked" : null);
-        }
-        else
-        {
-            DrawCard(22 + (2 * (w + gap)), y, w, h, "Parked", s.Parked.Count, Warn,
-                [.. s.Parked.TakeLast(3).Reverse().Select(p => (p, (string?)null))]);
-        }
-
-        IReadOnlyList<MeetingInsight> insights = s.Insights ?? [];
-        DrawCard(22 + (3 * (w + gap)), y, w, h, "Insights", insights.Count, InsightTone,
-            [.. insights.TakeLast(2).Reverse().Select(i => (i.Title + ": " + i.Text, (string?)(i.Citation ?? KindLabel(i.Kind))))],
-            dotColours: [.. insights.TakeLast(2).Reverse().Select(i => SeverityTone(i.Severity))]);
+        int space = full.IndexOf(' ');
+        return space > 0 ? full[..space] : full;
     }
 
-    private static readonly Color InsightTone = Color.FromArgb(129, 140, 248);
-
-    private static Color SeverityTone(string severity) => severity switch
+    private float TagPill(string label, Color tone, float x, float y)
     {
-        "high" => Over,
-        "medium" => Warn,
-        _ => Color.FromArgb(96, 165, 250),
+        float w = Measure(label, _micro) + 18;
+        FillRounded(Color.FromArgb(38, tone), x, y, w, 22, 6);
+        Text(label, _micro, tone, new RectangleF(x + 9, y + 3, w, 18), null);
+        return w;
+    }
+
+    private float SoftPill(string label, Color tone, float x, float y, bool measureOnly = false)
+    {
+        float w = Measure(label, _micro) + 22;
+        if (!measureOnly)
+        {
+            CardBox(Color.FromArgb(32, tone), Color.FromArgb(90, tone), x, y, w, 24, 12);
+            Text(label, _micro, tone, new RectangleF(x + 11, y + 4, w, 18), null);
+        }
+
+        return w;
+    }
+
+    private void CardBox(Color fill, Color border, float x, float y, float w, float h, float radius)
+    {
+        using GraphicsPath path = RoundedPath(x, y, w, h, radius);
+        using (SolidBrush brush = new(fill))
+        {
+            _g.FillPath(brush, path);
+        }
+
+        using Pen pen = new(border, 1f);
+        _g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundedPath(float x, float y, float w, float h, float radius)
+    {
+        GraphicsPath path = new();
+        float d = Math.Max(0.5f, Math.Min(radius * 2, Math.Min(w, h)));
+        path.AddArc(x, y, d, d, 180, 90);
+        path.AddArc(x + w - d, y, d, d, 270, 90);
+        path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+        path.AddArc(x, y + h - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private static Color KindTone(string kind) => kind switch
+    {
+        "knowledge" => WorkIqTone,
+        "skill" => SkillTone,
+        "risk" => Over,
+        "alignment" => Warn,
+        "pace" => InsightTone,
+        _ => InsightTone,
+    };
+
+    private static string ChipLabel(string kind) => kind switch
+    {
+        "knowledge" => "WORK IQ",
+        "skill" => "SKILL",
+        "risk" => "RISK",
+        "alignment" => "ALIGNMENT",
+        "pace" => "PACE",
+        _ => "FACILITATION",
     };
 
     private static string KindLabel(string kind) => kind switch
     {
-        "knowledge" => "Knowledge",
+        "knowledge" => "Work IQ",
         "risk" => "Risk",
         "alignment" => "Alignment",
         "pace" => "Pace",
@@ -451,163 +847,24 @@ public sealed class FacilitatorTileRenderer : IDisposable
         _ => "Facilitation",
     };
 
-    private void DrawCard(float x, float y, float w, float h, string title, int count, Color tone, IReadOnlyList<(string Text, string? Meta)> items, string? footer = null, IReadOnlyList<Color>? dotColours = null)
-    {
-        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 18);
-        FillRounded(tone, x, y + 18, 5, 40, 2.5f);
-
-        Text(count.ToString(), _count, Color.White, new RectangleF(x + 22, y + 10, 90, 46), null);
-        float countWidth = _g.MeasureString(count.ToString(), _count, PointF.Empty, StringFormat.GenericTypographic).Width;
-        Text(title.ToUpperInvariant(), _label, tone, new RectangleF(x + 30 + countWidth, y + 26, w - countWidth - 50, 20), null);
-
-        float iy = y + 70;
-        if (items.Count == 0)
-        {
-            Text("Nothing yet", _item, Muted, new RectangleF(x + 22, iy, w - 44, 26), null);
-        }
-
-        for (int index = 0; index < items.Count; index++)
-        {
-            (string text, string? meta) = items[index];
-            Color dot = dotColours is { Count: > 0 } dc ? dc[Math.Min(index, dc.Count - 1)] : tone;
-            using (SolidBrush bullet = new(dot))
-            {
-                _g.FillEllipse(bullet, x + 22, iy + 10, 7, 7);
-            }
-
-            foreach (string line in Wrap(text, _item, w - 60, meta is null ? 2 : (dotColours is null ? 1 : 3)))
-            {
-                Text(line, _item, Color.White, new RectangleF(x + 38, iy, w - 60, 26), null);
-                iy += 25;
-            }
-
-            if (meta is not null)
-            {
-                Text(Ellipsize(meta, _small, w - 60), _small, Muted, new RectangleF(x + 38, iy, w - 60, 22), null);
-                iy += 22;
-            }
-
-            iy += 14;
-        }
-
-        if (footer is not null)
-        {
-            Text(footer, _small, Muted, new RectangleF(x + 22, y + h - 32, w - 44, 22), null);
-        }
-    }
-
-    // ---- Breakdown view ----------------------------------------------------------------
-
-    private void DrawBreakdown(TileState s)
-    {
-        const float x = 310, y = 22, w = 948, h = 676;
-        (string title, Color tone, List<(string Text, string? Meta)> items) = s.View switch
-        {
-            TileView.Actions => ("Actions", ActionTone, s.Actions.Select(a =>
-                (a.Task, (string?)$"{a.Owner}{(string.IsNullOrWhiteSpace(a.Due) ? string.Empty : " \u00B7 due " + a.Due)}")).ToList()),
-            TileView.Decisions => ("Decisions", DecisionTone, s.Decisions.Select(d => (d, (string?)null)).ToList()),
-            TileView.Parked => ("Parking lot", Warn, s.Parked.Select(p => (p, (string?)null)).ToList()),
-            TileView.Tracked => ("Tracked", TrackedTone, s.Tracked.SelectMany(kv => kv.Value.Select(v => (v, (string?)kv.Key))).ToList()),
-            TileView.Insights => ("Insights", InsightTone, (s.Insights ?? []).Select(i =>
-                ($"{i.Title}: {i.Text}", (string?)(i.Citation ?? KindLabel(i.Kind)))).ToList()),
-            _ => ("Agenda", Ok, s.Agenda.Items.Select((a, i) => (
-                $"{(s.Agenda.Completed.Contains(i) ? "\u2713 " : i == s.Agenda.CurrentIndex ? "\u25B6 " : string.Empty)}{a.Title}",
-                (string?)(a.Minutes is { } m ? $"{m:0.#} min" : null))).ToList()),
-        };
-
-        FillRounded(Color.FromArgb(24, 255, 255, 255), x, y, w, h, 20);
-        FillRounded(tone, x, y + 24, 6, 44, 3);
-        Text(title, _name, Color.White, new RectangleF(x + 28, y + 18, w - 300, 48), null);
-        {
-            Text($"{items.Count} total", _body, Muted, new RectangleF(x + w - 260, y + 30, 232, 30), RightAligned);
-        }
-
-        Text(Ellipsize(s.Subject ?? string.Empty, _small, w - 56), _small, Muted, new RectangleF(x + 28, y + 70, w - 56, 22), null);
-
-        // Insights are sentences, not labels: give them room to wrap, with the source underneath.
-        bool longForm = s.View == TileView.Insights;
-        int maxRows = longForm ? 5 : 10;
-        IEnumerable<(string Text, string? Meta)> shown = items.Count > maxRows ? items.Skip(items.Count - maxRows) : items;
-        int number = Math.Max(0, items.Count - maxRows);
-        float iy = y + 112;
-
-        if (items.Count == 0)
-        {
-            Text("Nothing recorded yet.", _body, Muted, new RectangleF(x + 28, iy, w - 56, 30), null);
-        }
-
-        foreach ((string text, string? meta) in shown)
-        {
-            number++;
-            Text($"{number}", _body, tone, new RectangleF(x + 20, iy, 34, 30), RightAligned);
-
-            if (longForm)
-            {
-                foreach (string line in Wrap(text, _body, w - 110, 2))
-                {
-                    Text(line, _body, Color.White, new RectangleF(x + 68, iy, w - 110, 30), null);
-                    iy += 29;
-                }
-
-                if (meta is not null)
-                {
-                    Text(Ellipsize(meta, _item, w - 110), _item, Muted, new RectangleF(x + 68, iy + 2, w - 110, 26), null);
-                    iy += 28;
-                }
-
-                iy += 22;
-                continue;
-            }
-
-            float metaWidth = meta is null ? 0 : Math.Min(300, _g.MeasureString(meta, _item, PointF.Empty, StringFormat.GenericTypographic).Width + 8);
-            Text(Ellipsize(text, _body, w - 110 - metaWidth), _body, Color.White, new RectangleF(x + 68, iy, w - 110 - metaWidth, 30), null);
-            if (meta is not null)
-            {
-                Text(Ellipsize(meta, _item, 300), _item, Muted, new RectangleF(x + w - 28 - metaWidth, iy + 2, metaWidth, 28), RightAligned);
-            }
-
-            iy += 54;
-        }
-
-        if (items.Count > maxRows)
-        {
-            Text($"Showing the latest {maxRows}. The full list is in the recap.", _small, Muted, new RectangleF(x + 28, y + h - 34, w - 56, 22), null);
-        }
-
-        // Caption still matters in breakdown mode: it is how people see what Aria just said.
-        if (!string.IsNullOrWhiteSpace(s.Caption) && s.CaptionAt is { } at && (DateTimeOffset.UtcNow - at).TotalSeconds <= 25)
-        {
-            FillRounded(Color.FromArgb(110, 0, 0, 0), 22, 640, 270, 58, 12);
-            Text(Ellipsize("\u201C" + s.Caption.Trim() + "\u201D", _small, 250), _small, Color.White, new RectangleF(32, 657, 250, 24), null);
-        }
-    }
-
-    // ---- Primitives ----------------------------------------------------------------------
-
     private static Color Tone(AgentPresence presence) => presence switch
     {
-        AgentPresence.Listening => Color.FromArgb(45, 212, 191),
+        AgentPresence.Listening => Ok,
         AgentPresence.Thinking => Warn,
-        AgentPresence.Speaking => Color.FromArgb(167, 139, 250),
-        _ => Color.FromArgb(110, 106, 240),
+        AgentPresence.Speaking => SkillTone,
+        _ => DecisionTone,
     };
 
     private void Bar(float x, float y, float w, float h, double fraction, Color tone)
     {
-        FillRounded(Color.FromArgb(40, 255, 255, 255), x, y, w, h, h / 2);
+        FillRounded(Color.FromArgb(35, 255, 255, 255), x, y, w, h, h / 2);
         float fw = (float)Math.Max(h, w * Math.Clamp(fraction, 0, 1));
         FillRounded(tone, x, y, fw, h, h / 2);
     }
 
     private void FillRounded(Color color, float x, float y, float w, float h, float radius)
     {
-        using GraphicsPath path = new();
-        float d = Math.Max(0.5f, Math.Min(radius * 2, Math.Min(w, h)));
-        path.AddArc(x, y, d, d, 180, 90);
-        path.AddArc(x + w - d, y, d, d, 270, 90);
-        path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-        path.AddArc(x, y + h - d, d, d, 90, 90);
-        path.CloseFigure();
+        using GraphicsPath path = RoundedPath(x, y, w, h, radius);
         using SolidBrush brush = new(color);
         _g.FillPath(brush, path);
     }
@@ -667,12 +924,6 @@ public sealed class FacilitatorTileRenderer : IDisposable
 
         return text[..len].TrimEnd() + "\u2026";
     }
-
-    private static Color Lighten(Color c, float amount) => Color.FromArgb(
-        c.A,
-        (int)(c.R + ((255 - c.R) * amount)),
-        (int)(c.G + ((255 - c.G) * amount)),
-        (int)(c.B + ((255 - c.B) * amount)));
 
     private static string Clock(TimeSpan t) =>
         t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{(int)t.TotalMinutes:00}:{t.Seconds:00}";
@@ -734,14 +985,14 @@ public sealed class FacilitatorTileRenderer : IDisposable
         _captureImage?.Dispose();
         _g.Dispose();
         _bitmap.Dispose();
-        _title.Dispose();
-        _name.Dispose();
+        _h1.Dispose();
+        _h2.Dispose();
+        _cardTitle.Dispose();
         _body.Dispose();
-        _item.Dispose();
         _small.Dispose();
-        _big.Dispose();
-        _count.Dispose();
-        _label.Dispose();
+        _micro.Dispose();
+        _clock.Dispose();
+        _metric.Dispose();
         _caption.Dispose();
     }
 }

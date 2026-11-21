@@ -237,7 +237,7 @@ public sealed class FacilitatorOptions
     public string ScribeModel { get; set; } = "gpt-5.4-mini";
 
     /// <summary>How often the scribe folds new conversation into the running notes.</summary>
-    public int ScribeIntervalSeconds { get; set; } = 45;
+    public int ScribeIntervalSeconds { get; set; } = 15;
 
     /// <summary>Speak time checks at the halfway point and shortly before the scheduled end.</summary>
     public bool ProactiveTimeChecks { get; set; } = true;
@@ -266,7 +266,7 @@ public sealed class FacilitatorOptions
     public bool LiveKnowledge { get; set; } = true;
 
     /// <summary>Minimum gap between background lookups, so the tile isn't flooded.</summary>
-    public int KnowledgeCooldownSeconds { get; set; } = 120;
+    public int KnowledgeCooldownSeconds { get; set; } = 15;
 
     /// <summary>Custom skills and profiles, outside the app folder so redeploys keep them.</summary>
     public string CustomSkillsPath { get; set; } = @"C:\rtbot\skills";

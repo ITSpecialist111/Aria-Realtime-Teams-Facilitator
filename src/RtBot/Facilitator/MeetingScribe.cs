@@ -12,9 +12,9 @@ namespace RtBot.Facilitator;
 /// Each pass sees the previous notes plus only the turns since, so cost stays flat over a long call.
 /// </remarks>
 /// <summary>What the scribe suggests acting on after a pass, beyond updating the notes.</summary>
-public sealed record ScribeOutcome(string? Lookup, string? SkillShift)
+public sealed record ScribeOutcome(IReadOnlyList<string> Lookups, IReadOnlyList<string> SkillShifts)
 {
-    public static ScribeOutcome None { get; } = new(null, null);
+    public static ScribeOutcome None { get; } = new([], []);
 }
 
 public sealed class MeetingScribe
@@ -30,9 +30,10 @@ public sealed class MeetingScribe
           "open_questions": ["questions raised and not yet answered"],
           "tracked": {"<category>": ["item"]},
           "covered": ["checklist items that were dealt with in these lines"],
-          "insights": [{"kind": "risk|alignment|facilitation|pace", "severity": "high|medium|info", "title": "3-6 words", "text": "one or two sentences"}],
-          "lookup": "one question to look up in the organisation's Microsoft 365 data (mail, files, meetings, chats) that would genuinely help this discussion right now, or null",
-          "skill_shift": "the name of an AVAILABLE SKILL that the conversation has clearly moved into, or null"
+          "alignment": {"score": 0-100, "note": "at most 8 words on why"},
+          "insights": [{"kind": "skill|risk|alignment|facilitation|pace", "severity": "high|medium|info", "title": "3-6 words", "text": "one or two sentences", "skill": "skill-name if kind is skill, else null"}],
+          "lookups": ["up to two concise search queries for the organisation's Microsoft 365 data (mail, files, playbooks, policies, meetings)"],
+          "skill_shifts": ["up to two AVAILABLE SKILL names whose domain or triggers appear in NEW TRANSCRIPT LINES"]
         }
 
         Rules:
@@ -42,13 +43,23 @@ public sealed class MeetingScribe
         - Keep previous decisions and actions unless the transcript explicitly reverses them.
         - "tracked" uses only the categories given under SPECIALIST TRACKING, and only new items from these lines.
           "covered" uses only the wording given under CHECKLIST. Omit both when none are given.
-        - "insights" are only for things worth a facilitator's attention in THESE lines: a risk or dependency
+        - "alignment" is your read of how aligned the room is right now: 90+ shared understanding and converging,
+          60-89 broadly aligned with open points, 30-59 people disagreeing or talking past each other,
+          below 30 conflict or confusion. Give a score on every pass and keep it stable unless something changed.
+        - "insights" are things worth a facilitator's attention in THESE lines: a risk or dependency
           nobody owns, people disagreeing or talking past each other (alignment), a decision being avoided,
           a topic going round in circles, someone not heard from, too much detail for this forum (pace).
-          Usually zero or one. Never restate the notes. Never more than two.
-        - "lookup" only when a fact, document, prior decision or commitment from outside this meeting would
-          change the discussion (for example "what did we agree with the steel supplier about lead times").
-          Otherwise null. Never ask about the meeting itself.
+          When ACTIVE SKILLS are given, also apply their expertise: use kind "skill" for a gap, risk or next step
+          that the skill's guidance says matters (for example an unnamed incident owner, an unvetted contractual
+          promise, a missing checklist item). Be specific to what was said. Up to three; usually zero to two.
+          Never restate the notes or repeat an insight already raised (see INSIGHTS ALREADY RAISED).
+        - "lookups" are focused search queries whose answer lives in the organisation's Microsoft 365 emails,
+          playbooks, policies, contracts or reports and would immediately ground this discussion (for example
+          "Northwind Health immutable backup EHR restore time", "ICO NHS DSPT regulatory notification deadline",
+          "cyber insurance policy extortion ransom terms", "board crisis authority matrix"). Keep queries crisp
+          (4-10 keywords or a short factual question). Empty list when nothing would help. Never ask about this meeting itself.
+        - "skill_shifts": proactively include any AVAILABLE SKILL whose domain or trigger concepts appear in NEW
+          TRANSCRIPT LINES so the facilitator brings that specialist lens in automatically without waiting to be asked.
         - Lines marked [agent] are the AI facilitator; do not credit it with decisions.
         - Be terse. These notes are read aloud and posted to chat.
         """;
@@ -80,16 +91,26 @@ public sealed class MeetingScribe
         IReadOnlyList<MeetingSkill> skills = meeting.ActiveSkills;
         string categories = string.Join(", ", skills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));
         string checklist = string.Join("; ", meeting.UncoveredChecklist);
-        string inactive = string.Join("; ", (availableSkills ?? [])
-            .Where(a => !skills.Any(s => s.Name.Equals(a.Name, StringComparison.OrdinalIgnoreCase)))
-            .Select(a => $"{a.Name}: {a.Description}"));
+        IReadOnlyList<MeetingSkill> inactiveSkills = [.. (availableSkills ?? [])
+            .Where(a => !skills.Any(s => s.Name.Equals(a.Name, StringComparison.OrdinalIgnoreCase)))];
+        string inactive = string.Join("\n", inactiveSkills
+            .Select(a => $"- {a.Name}: {a.Description} (triggers: {string.Join(", ", a.Triggers.Take(10))})"));
+        string guidance = string.Join("\n\n", skills.Select(s =>
+            $"## {s.Name}: {s.Description}\n{(s.Guidance.Length > 1400 ? s.Guidance[..1400] : s.Guidance)}"));
+        string raised = string.Join("; ", meeting.Insights.TakeLast(10).Select(i => i.Title));
         string user = $"""
             CURRENT NOTES:
             {RenderNotesForModel(current)}
 
+            ACTIVE SKILLS:
+            {(guidance.Length > 0 ? guidance : "(none)")}
+
+            INSIGHTS ALREADY RAISED: {(raised.Length > 0 ? raised : "(none)")}
+
             SPECIALIST TRACKING: {(categories.Length > 0 ? categories : "(none)")}
             CHECKLIST: {(checklist.Length > 0 ? checklist : "(none)")}
-            AVAILABLE SKILLS: {(inactive.Length > 0 ? inactive : "(none)")}
+            AVAILABLE SKILLS:
+            {(inactive.Length > 0 ? inactive : "(none)")}
 
             NEW TRANSCRIPT LINES:
             {RenderTurns(turns)}
@@ -106,25 +127,55 @@ public sealed class MeetingScribe
 
         if (result["insights"] is JsonArray insights)
         {
-            foreach (JsonNode? node in insights.Take(2))
+            foreach (JsonNode? node in insights.Take(3))
             {
                 string? title = node?["title"]?.GetValue<string>();
                 string? text = node?["text"]?.GetValue<string>();
                 if (!string.IsNullOrWhiteSpace(title) && !string.IsNullOrWhiteSpace(text))
                 {
+                    string kind = node?["kind"]?.GetValue<string>() ?? "facilitation";
+                    string? skillName = node?["skill"] is JsonValue skv && skv.TryGetValue(out string? sn) && !string.IsNullOrWhiteSpace(sn)
+                        ? MeetingContext.Titleise(sn)
+                        : null;
                     meeting.AddInsight(new MeetingInsight(
-                        node?["kind"]?.GetValue<string>() ?? "facilitation",
+                        kind,
                         node?["severity"]?.GetValue<string>() ?? "info",
                         title,
                         text,
-                        null,
+                        kind.Equals("skill", StringComparison.OrdinalIgnoreCase) ? skillName : null,
                         DateTimeOffset.UtcNow));
                 }
             }
         }
 
-        string? lookup = result["lookup"] is JsonValue lv && lv.TryGetValue(out string? q) && !string.IsNullOrWhiteSpace(q) ? q : null;
-        string? shift = result["skill_shift"] is JsonValue sv && sv.TryGetValue(out string? n) && !string.IsNullOrWhiteSpace(n) ? n : null;
+        if (result["alignment"] is JsonObject align && align["score"] is JsonValue sc && sc.TryGetValue(out double score))
+        {
+            meeting.SetAlignment((int)Math.Round(score), align["note"] is JsonValue nv && nv.TryGetValue(out string? note) ? note : null);
+        }
+
+        List<string> lookups = [.. ReadStrings(result["lookups"]).Where(q => q.Length > 6).Take(2)];
+        List<string> shifts = [.. ReadStrings(result["skill_shifts"]).Take(2)];
+        if (shifts.Count == 0 && result["skill_shift"] is JsonValue sv && sv.TryGetValue(out string? singleShift) && !string.IsNullOrWhiteSpace(singleShift))
+        {
+            shifts.Add(singleShift);
+        }
+
+        // Deterministic trigger backstop so clear domain keywords always pull in the matching skill on demand.
+        string spokenBatch = string.Join(" ", turns.Where(t => !t.IsAgent).Select(t => t.Text));
+        foreach (MeetingSkill candidate in inactiveSkills)
+        {
+            if (shifts.Count >= 2 || shifts.Contains(candidate.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            int hits = candidate.Triggers.Count(trig => ContainsWholePhrase(spokenBatch, trig));
+            bool phraseHit = candidate.Triggers.Any(trig => trig.Contains(' ') && ContainsWholePhrase(spokenBatch, trig));
+            if (hits >= 2 || phraseHit)
+            {
+                shifts.Add(candidate.Name);
+            }
+        }
 
         HashSet<string> allowed = new(skills.SelectMany(s => s.Track), StringComparer.OrdinalIgnoreCase);
         if (result["tracked"] is JsonObject tracked)
@@ -173,7 +224,7 @@ public sealed class MeetingScribe
             decisions.Count,
             actions.Count,
             questions.Count);
-        return new ScribeOutcome(lookup, shift);
+        return new ScribeOutcome(lookups, shifts);
     }
 
     private const string ReportPrompt = """
@@ -332,7 +383,9 @@ public sealed class MeetingScribe
             md.Append("**Captured: ").Append(v.Title).Append("** _(").Append(v.Source).Append(")_  \n").AppendLine(v.Summary).AppendLine();
         }
 
-        IReadOnlyList<MeetingInsight> insights = meeting.Insights;
+        // The chat is visible to everyone present, so organisation-sourced findings stay out while a guest is in the meeting.
+        IReadOnlyList<MeetingInsight> insights = [.. meeting.Insights.Where(i =>
+            !meeting.IsRestricted || !i.Kind.Equals("knowledge", StringComparison.OrdinalIgnoreCase))];
         if (insights.Count > 0)
         {
             md.AppendLine("**Insights**");
@@ -413,4 +466,11 @@ public sealed class MeetingScribe
         node is JsonArray array
             ? [.. array.Select(n => n?.GetValue<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!.Trim())]
             : [];
+
+    public static bool ContainsWholePhrase(string text, string phrase) =>
+        !string.IsNullOrWhiteSpace(phrase) &&
+        System.Text.RegularExpressions.Regex.IsMatch(
+            text,
+            $@"(?<!\w){System.Text.RegularExpressions.Regex.Escape(phrase.Trim())}(?!\w)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 }

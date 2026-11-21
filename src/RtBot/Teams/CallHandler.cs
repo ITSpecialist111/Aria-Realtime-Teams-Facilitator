@@ -60,6 +60,10 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private DateTimeOffset _lastScribe = DateTimeOffset.UtcNow;
     private DateTimeOffset _lastLookup = DateTimeOffset.MinValue;
     private int _lookupRunning;
+    private readonly object _lookupGate = new();
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _lookupQueue = new();
+    private readonly HashSet<string> _askedLookups = [];
+    private readonly Queue<string> _askedOrder = new();
     private TextModelClient? _textModel;
     private bool _halfwayAnnounced;
     private bool _wrapUpAnnounced;
@@ -131,6 +135,14 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     public MeetingContext Meeting { get; }
 
+    public string AgentName => _options.Voice.AgentName;
+
+    /// <summary>Link to this call's companion dashboard, or null when the public host is not configured.</summary>
+    private string? DashboardUrl =>
+        string.IsNullOrWhiteSpace(_options.Media.ServiceFqdn)
+            ? null
+            : $"https://{_options.Media.ServiceFqdn}{(_options.Media.SignalingPublicPort == 443 ? string.Empty : ":" + _options.Media.SignalingPublicPort)}/live/{Uri.EscapeDataString(_call.Id)}#k={Meeting.ViewKey}";
+
     public MeetingToolset Tools { get; }
 
     /// <summary>The live video tile, when the call has a video socket.</summary>
@@ -163,7 +175,15 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             Meeting.SpecialismLabel,
             Meeting.CurrentView,
             Meeting.Visuals.LastOrDefault(),
-            Meeting.Insights);
+            Meeting.IsRestricted
+                ? [.. Meeting.Insights.Where(i => !i.Kind.Equals("knowledge", StringComparison.OrdinalIgnoreCase))]
+                : Meeting.Insights,
+            Meeting.Alignment,
+            Meeting.AlignmentNote,
+            Meeting.AlignmentTrend,
+            Meeting.Voices(),
+            Meeting.IsRestricted ? null : Meeting.Searching,
+            Meeting.ActiveSkillBadges);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -215,6 +235,17 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             Meeting.ActivateSkill(skill);
         }
 
+        if (chosen.Count > 0)
+        {
+            Meeting.AddInsight(new MeetingInsight(
+                "skill",
+                "info",
+                "Specialist skills loaded",
+                string.Join("; ", chosen.Select(s => $"{s.Name}: {s.Description}")),
+                null,
+                DateTimeOffset.UtcNow));
+        }
+
         _logger.LogWarning(
             "Profile {Profile}; skills available {Available}; active {Active}.",
             Meeting.Profile.Name,
@@ -252,51 +283,250 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     private async Task ActOnScribeAsync(ScribeOutcome outcome, CancellationToken cancellationToken)
     {
-        if (outcome.SkillShift is { } shift &&
-            _availableSkills.FirstOrDefault(s => s.Name.Equals(shift, StringComparison.OrdinalIgnoreCase)) is { } skill &&
-            Meeting.ActivateSkill(skill))
+        List<MeetingSkill> newlyActivated = [];
+        foreach (string shift in outcome.SkillShifts)
         {
-            Meeting.AddInsight(new MeetingInsight("skill", "info", "Specialist skill activated", $"{skill.Name}: {skill.Description}", null, DateTimeOffset.UtcNow));
-            await _bridge.RefreshSessionAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogWarning("Skill {Skill} activated from conversation.", skill.Name);
+            if (_availableSkills.FirstOrDefault(s => s.Name.Equals(shift, StringComparison.OrdinalIgnoreCase)) is { } skill &&
+                Meeting.ActivateSkill(skill, dynamic: true))
+            {
+                newlyActivated.Add(skill);
+                Meeting.AddInsight(new MeetingInsight(
+                    "skill",
+                    "info",
+                    $"Skill activated: {MeetingContext.Titleise(skill.Name)}",
+                    skill.Description,
+                    MeetingContext.Titleise(skill.Name),
+                    DateTimeOffset.UtcNow));
+                _logger.LogWarning("Skill {Skill} activated from conversation.", skill.Name);
+            }
         }
 
-        // Live knowledge: look it up quietly and put it on the tile; Aria mentions it only if asked or it matters.
-        if (outcome.Lookup is { } question &&
-            _facilitator.LiveKnowledge &&
-            !Meeting.IsRestricted &&
-            DateTimeOffset.UtcNow - _lastLookup > TimeSpan.FromSeconds(_facilitator.KnowledgeCooldownSeconds) &&
-            Tools.AvailableSpecs().Any(s => s.Name == "workiq_ask") &&
-            Interlocked.CompareExchange(ref _lookupRunning, 1, 0) == 0)
+        if (newlyActivated.Count > 0)
         {
-            _lastLookup = DateTimeOffset.UtcNow;
-            _ = Task.Run(() => LookupKnowledgeAsync(question, _cts.Token), CancellationToken.None);
+            await _bridge.RefreshSessionAsync(cancellationToken).ConfigureAwait(false);
+            foreach (MeetingSkill skill in newlyActivated)
+            {
+                MeetingSkill captured = skill;
+                _ = Task.Run(() => ApplySkillLensAsync(captured, _cts.Token), CancellationToken.None);
+            }
+        }
+
+        EnqueueLookups(outcome.Lookups);
+    }
+
+    private void EnqueueLookups(IEnumerable<string> questions)
+    {
+        if (!_facilitator.LiveKnowledge ||
+            Meeting.IsRestricted ||
+            !Tools.AvailableSpecs().Any(s => s.Name is "workiq_retrieve" or "workiq_ask"))
+        {
+            return;
+        }
+
+        lock (_lookupGate)
+        {
+            foreach (string question in questions)
+            {
+                string key = question.Trim().ToLowerInvariant();
+                if (key.Length > 6 && _lookupQueue.Count < 4 && _askedLookups.Add(key))
+                {
+                    _askedOrder.Enqueue(key);
+                    if (_askedOrder.Count > 40)
+                    {
+                        _askedLookups.Remove(_askedOrder.Dequeue());
+                    }
+
+                    _lookupQueue.Enqueue(question.Trim());
+                }
+            }
+        }
+
+        if (!_lookupQueue.IsEmpty && Interlocked.CompareExchange(ref _lookupRunning, 1, 0) == 0)
+        {
+            _ = Task.Run(() => DrainLookupsAsync(_cts.Token), CancellationToken.None);
+        }
+    }
+
+    /// <summary>Immediately evaluates recent conversation through a newly activated specialist skill.</summary>
+    private async Task ApplySkillLensAsync(MeetingSkill skill, CancellationToken cancellationToken)
+    {
+        if (_textModel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            IReadOnlyList<TranscriptTurn> recent = Meeting.RecentTurns(12).Where(t => !t.IsAgent).ToList();
+            if (recent.Count == 0)
+            {
+                return;
+            }
+
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+
+            string turns = string.Join("\n", recent.Select(t => $"{t.Speaker}: {t.Text}"));
+            JsonNode? node = await _textModel.CompleteJsonAsync(
+                _facilitator.ScribeModel,
+                """
+                Apply the specialist meeting skill below to the recent conversation lines.
+                Return JSON: {"has_insight": true|false, "severity": "high|medium|info", "title": "3-6 words", "text": "one crisp actionable sentence grounded in what was said", "lookup": "one focused M365 search query (4-10 keywords) if an internal playbook, policy, contract or report would help, else null"}
+                Set has_insight to false if there is nothing concrete to add yet.
+                """,
+                $"SKILL: {skill.Name} - {skill.Description}\nGUIDANCE:\n{(skill.Guidance.Length > 1600 ? skill.Guidance[..1600] : skill.Guidance)}\n\nRECENT CONVERSATION:\n{turns}",
+                timeout.Token).ConfigureAwait(false);
+
+            if (node?["has_insight"]?.GetValue<bool>() == true)
+            {
+                string? title = node["title"]?.GetValue<string>();
+                string? text = node["text"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(title) && !string.IsNullOrWhiteSpace(text))
+                {
+                    Meeting.AddInsight(new MeetingInsight(
+                        "skill",
+                        node["severity"]?.GetValue<string>() ?? "info",
+                        title,
+                        text,
+                        MeetingContext.Titleise(skill.Name),
+                        DateTimeOffset.UtcNow));
+                }
+            }
+
+            if (node?["lookup"] is JsonValue lv && lv.TryGetValue(out string? lookup) && !string.IsNullOrWhiteSpace(lookup))
+            {
+                EnqueueLookups([lookup]);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Immediate skill-lens evaluation failed for {Skill}.", skill.Name);
+        }
+        catch (OperationCanceledException)
+        {
+            // Call ended.
+        }
+    }
+
+    private async Task DrainLookupsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && !Meeting.IsRestricted && _lookupQueue.TryDequeue(out string? question))
+            {
+                TimeSpan wait = TimeSpan.FromSeconds(_facilitator.KnowledgeCooldownSeconds) - (DateTimeOffset.UtcNow - _lastLookup);
+                if (wait > TimeSpan.Zero)
+                {
+                    await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+                }
+
+                // A guest may have joined during the wait.
+                if (Meeting.IsRestricted)
+                {
+                    break;
+                }
+
+                _lastLookup = DateTimeOffset.UtcNow;
+                Meeting.Searching = question;
+                try
+                {
+                    await LookupKnowledgeAsync(question, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Meeting.Searching = null;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Call ended.
+        }
+        finally
+        {
+            // Questions queued before a guest arrived must not run after they leave.
+            if (Meeting.IsRestricted)
+            {
+                _lookupQueue.Clear();
+            }
+
+            Interlocked.Exchange(ref _lookupRunning, 0);
+
+            if (!cancellationToken.IsCancellationRequested &&
+                !Meeting.IsRestricted &&
+                !_lookupQueue.IsEmpty &&
+                Interlocked.CompareExchange(ref _lookupRunning, 1, 0) == 0)
+            {
+                _ = Task.Run(() => DrainLookupsAsync(cancellationToken), CancellationToken.None);
+            }
         }
     }
 
     private async Task LookupKnowledgeAsync(string question, CancellationToken cancellationToken)
     {
+        if (_textModel is null)
+        {
+            return;
+        }
+
         try
         {
-            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(45));
+            string? raw = null;
+            IReadOnlyList<RtBot.Tools.ToolSpec> specs = Tools.AvailableSpecs();
 
-            string raw = await Tools.InvokeAsync("workiq_ask", JsonSerializer.Serialize(new { question }), timeout.Token).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(raw) || raw.Contains("\"error\"", StringComparison.Ordinal) || _textModel is null)
+            // Prefer workiq_retrieve (~7 s semantic M365 search); fall back to workiq_ask only if needed.
+            if (specs.Any(s => s.Name == "workiq_retrieve"))
+            {
+                using CancellationTokenSource retrieveTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                retrieveTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+                try
+                {
+                    string candidate = await Tools
+                        .InvokeAsync("workiq_retrieve", JsonSerializer.Serialize(new { query = question }), retrieveTimeout.Token)
+                        .ConfigureAwait(false);
+                    if (!IsToolError(candidate) && !IsEmptyRetrieval(candidate))
+                    {
+                        raw = candidate;
+                    }
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning(ex, "workiq_retrieve failed for '{Question}'; trying workiq_ask.", question);
+                }
+            }
+
+            if (raw is null && specs.Any(s => s.Name == "workiq_ask"))
+            {
+                using CancellationTokenSource askTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                askTimeout.CancelAfter(TimeSpan.FromSeconds(65));
+                string candidate = await Tools
+                    .InvokeAsync("workiq_ask", JsonSerializer.Serialize(new { question }), askTimeout.Token)
+                    .ConfigureAwait(false);
+                if (!IsToolError(candidate))
+                {
+                    raw = candidate;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(raw))
             {
                 _logger.LogWarning("Live knowledge lookup returned nothing usable for: {Question}", question);
                 return;
             }
 
+            // Separate timeout so a slow Work IQ call never starves card synthesis.
+            using CancellationTokenSource synthTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            synthTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+
             JsonNode? card = await _textModel.CompleteJsonAsync(
                 _facilitator.ScribeModel,
                 """
-                Turn an answer from the organisation's Microsoft 365 data into a short card for a live meeting.
-                Return JSON: {"relevant": true|false, "title": "3-6 words", "text": "the useful fact in at most two sentences", "source": "the document, email, meeting or chat it came from, if named, else null"}
-                Set relevant to false if the answer is empty, says nothing was found, or doesn't answer the question.
+                Turn M365 search passages or answers from Work IQ into a crisp, high-value card for a live meeting.
+                Return JSON: {"relevant": true|false, "title": "3-6 words", "text": "the concrete operational fact, deadline, SLA or policy rule in at most two short sentences", "source": "short title of the email, playbook, document or meeting it came from, if named, else null"}
+                Set relevant to false if the results are unrelated, empty, or say nothing was found.
                 """,
-                $"QUESTION: {question}\nANSWER: {(raw.Length > 6000 ? raw[..6000] : raw)}",
-                timeout.Token).ConfigureAwait(false);
+                $"QUERY: {question}\nWORK IQ RESULTS:\n{(raw.Length > 8000 ? raw[..8000] : raw)}",
+                synthTimeout.Token).ConfigureAwait(false);
 
             if (card?["relevant"]?.GetValue<bool>() != true)
             {
@@ -326,11 +556,35 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         {
             _logger.LogWarning(ex, "Live knowledge lookup failed.");
         }
-        finally
+    }
+
+    private static bool IsToolError(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            Interlocked.Exchange(ref _lookupRunning, 0);
+            return true;
+        }
+
+        ReadOnlySpan<char> trimmed = raw.AsSpan().TrimStart();
+        if (!trimmed.StartsWith("{", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            return JsonNode.Parse(raw) is JsonObject obj && obj.ContainsKey("error");
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
+
+    private static bool IsEmptyRetrieval(string raw) =>
+        raw.Contains("\"results\":[]", StringComparison.Ordinal) ||
+        raw.Contains("\"results\": []", StringComparison.Ordinal) ||
+        raw.Contains("The tool returned no content.", StringComparison.Ordinal);
 
     public Task<bool> PostToChatAsync(string markdown, CancellationToken cancellationToken) =>
         Meeting.ThreadId is { } thread
@@ -435,7 +689,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         bool posted = await PostToChatAsync(
             $"""
             **{name} (AI facilitator) has joined and is taking notes.**
-            Say "{name}" to ask a question out loud, or @mention me here. I'm keeping notes, decisions and action items{(_facilitator.PostRecapOnEnd ? " and will post a recap when the meeting ends" : string.Empty)}. Ask me to leave at any time.
+            Say "{name}" to ask a question out loud, or @mention me here. I'm keeping notes, decisions and action items{(_facilitator.PostRecapOnEnd ? " and will post a recap when the meeting ends" : string.Empty)}. Ask me to leave at any time.{(DashboardUrl is { } dash ? $"\n\n[Open the live dashboard]({dash}) for my insights, skills and findings from your Microsoft 365 data. The link is for people in this meeting only." : string.Empty)}
             """,
             cancellationToken).ConfigureAwait(false);
 

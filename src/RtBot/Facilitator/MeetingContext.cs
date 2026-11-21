@@ -32,6 +32,14 @@ public sealed record VisualNote(
     byte[] Jpeg,
     DateTimeOffset At);
 
+/// <summary>An active specialist skill and whether it was brought in dynamically mid-meeting.</summary>
+public sealed record ActiveSkillBadge(
+    string Name,
+    string Label,
+    string Description,
+    DateTimeOffset ActivatedAt,
+    bool Dynamic);
+
 /// <summary>Where the agenda stands right now.</summary>
 public sealed record AgendaStatus(
     IReadOnlyList<AgendaItem> Items,
@@ -71,6 +79,7 @@ public sealed class MeetingContext
     private readonly List<string> _parkingLot = [];
     private readonly List<MeetingTimer> _timers = [];
     private readonly List<MeetingSkill> _skills = [];
+    private readonly Dictionary<string, (DateTimeOffset At, bool Dynamic)> _skillMeta = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<string>> _tracked = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _covered = new(StringComparer.OrdinalIgnoreCase);
 
@@ -158,9 +167,15 @@ public sealed class MeetingContext
 
         lock (_gate)
         {
-            if (_insights.TakeLast(12).Any(i => i.Title.Equals(insight.Title, StringComparison.OrdinalIgnoreCase)) || _insights.Count >= 100)
+            if (_insights.TakeLast(12).Any(i => i.Title.Equals(insight.Title, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
+            }
+
+            // A long call keeps its newest insights rather than going silent at the cap.
+            if (_insights.Count >= 100)
+            {
+                _insights.RemoveAt(0);
             }
 
             _insights.Add(insight);
@@ -210,17 +225,33 @@ public sealed class MeetingContext
         }
     }
 
-    /// <summary>Adds a skill if not already active. Returns false when it was.</summary>
-    public bool ActivateSkill(MeetingSkill skill)
+    public IReadOnlyList<ActiveSkillBadge> ActiveSkillBadges
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _skills.Select(s =>
+                {
+                    (DateTimeOffset at, bool dynamic) = _skillMeta.TryGetValue(s.Name, out var m) ? m : (JoinedAt, false);
+                    return new ActiveSkillBadge(s.Name, Titleise(s.Name), s.Description, at, dynamic);
+                })];
+            }
+        }
+    }
+
+    /// <summary>Adds a skill if not already active. Returns false when it was or the cap is reached.</summary>
+    public bool ActivateSkill(MeetingSkill skill, bool dynamic = false)
     {
         lock (_gate)
         {
-            if (_skills.Any(s => s.Name.Equals(skill.Name, StringComparison.OrdinalIgnoreCase)))
+            if (_skills.Count >= 6 || _skills.Any(s => s.Name.Equals(skill.Name, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
 
             _skills.Add(skill);
+            _skillMeta[skill.Name] = (DateTimeOffset.UtcNow, dynamic);
             return true;
         }
     }
@@ -296,8 +327,83 @@ public sealed class MeetingContext
         }
     }
 
-    private static string Titleise(string name) =>
+    public static string Titleise(string name) =>
         string.Join(' ', name.Split('-', StringSplitOptions.RemoveEmptyEntries).Select(w => char.ToUpperInvariant(w[0]) + w[1..]));
+
+    private readonly List<int> _alignmentTrend = [];
+    private string _alignmentNote = string.Empty;
+
+    /// <summary>The scribe's read on how aligned the room is, 0-100, or null before the first reading.</summary>
+    public int? Alignment
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _alignmentTrend.Count == 0 ? null : _alignmentTrend[^1];
+            }
+        }
+    }
+
+    public string AlignmentNote
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _alignmentNote;
+            }
+        }
+    }
+
+    public IReadOnlyList<int> AlignmentTrend
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _alignmentTrend];
+            }
+        }
+    }
+
+    public void SetAlignment(int score, string? note)
+    {
+        lock (_gate)
+        {
+            _alignmentTrend.Add(Math.Clamp(score, 0, 100));
+            if (_alignmentTrend.Count > 24)
+            {
+                _alignmentTrend.RemoveAt(0);
+            }
+
+            _alignmentNote = OneLine(note ?? string.Empty, 80);
+        }
+    }
+
+    private string? _searching;
+
+    /// <summary>The question being looked up in Work IQ right now, shown on the tile as live activity.</summary>
+    public string? Searching
+    {
+        get => Volatile.Read(ref _searching);
+        set => Volatile.Write(ref _searching, value is null ? null : OneLine(value, 120));
+    }
+
+    /// <summary>Unguessable key that opens this call's companion dashboard; shared only in the meeting chat.</summary>
+    public string ViewKey { get; } = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+
+    /// <summary>Each speaker's share of human talk time, largest first.</summary>
+    public IReadOnlyList<(string Name, double Share)> Voices()
+    {
+        lock (_gate)
+        {
+            double total = _talkTime.Values.Sum(t => t.TotalSeconds);
+            return total <= 0
+                ? []
+                : [.. _talkTime.OrderByDescending(kv => kv.Value).Take(5).Select(kv => (kv.Key, kv.Value.TotalSeconds / total))];
+        }
+    }
 
     public TimeSpan Elapsed => DateTimeOffset.UtcNow - (ScheduledStart is { } s && s < JoinedAt ? s : JoinedAt);
 
@@ -682,7 +788,9 @@ public sealed class MeetingContext
             sb.Append("Not yet covered: ").AppendLine(string.Join("; ", uncovered));
         }
 
-        IReadOnlyList<MeetingInsight> insights = Insights;
+        IReadOnlyList<MeetingInsight> insights = IsRestricted
+            ? [.. Insights.Where(i => !i.Kind.Equals("knowledge", StringComparison.OrdinalIgnoreCase))]
+            : Insights;
         if (insights.Count > 0)
         {
             sb.Append("Recent insights (shown on your tile, not yet spoken): ").AppendLine(string.Join("; ", insights.TakeLast(5).Select(i =>

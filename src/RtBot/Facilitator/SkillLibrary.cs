@@ -13,14 +13,16 @@ namespace RtBot.Facilitator;
 /// </remarks>
 public sealed class SkillLibrary
 {
-    private const int MaxActiveSkills = 3;
+    // Start lean at join so specialist skills visibly activate on demand as the conversation shifts.
+    private const int MaxInitialSkills = 1;
 
     private const string SelectPrompt = """
-        You choose which specialist skills an AI meeting facilitator should apply to a meeting.
+        You choose the single primary baseline skill an AI meeting facilitator should start with from a meeting invite.
         You get the meeting subject, the agenda, and the available skills. Return JSON:
-        {"skills":["skill-name", ...]}
+        {"skills":["skill-name"]}
 
-        Pick at most three, only skills that clearly fit. Return {"skills":[]} if none fit.
+        Pick at most ONE primary skill that best matches the opening premise. Additional specialist skills will
+        activate automatically during the live conversation as topics arise. Return {"skills":[]} if none clearly fit.
         """;
 
     private readonly FacilitatorOptions _options;
@@ -159,13 +161,14 @@ public sealed class SkillLibrary
         {
             _logger.LogWarning(ex, "Skill selection by model failed; falling back to keyword triggers.");
             picked.AddRange(candidates
-                .Where(s => s.Triggers.Any(t => context.Contains(t, StringComparison.OrdinalIgnoreCase)))
+                .Where(s => s.Triggers.Any(t => MeetingScribe.ContainsWholePhrase(context, t)))
                 .Select(s => s.Name));
         }
 
+        int autoAdded = 0;
         foreach (string name in picked)
         {
-            if (chosen.Count >= MaxActiveSkills)
+            if (autoAdded >= MaxInitialSkills)
             {
                 break;
             }
@@ -173,6 +176,7 @@ public sealed class SkillLibrary
             if (candidates.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } skill && !chosen.Contains(skill))
             {
                 chosen.Add(skill);
+                autoAdded++;
             }
         }
 

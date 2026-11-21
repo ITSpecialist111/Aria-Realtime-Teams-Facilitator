@@ -12,7 +12,9 @@ Aria joins a Teams meeting as a participant, listens to the whole conversation, 
 
 ## Demo
 
-**Aria's video tile.** Rendered by the bot and streamed into the meeting at 15 fps. Across the top: the presence orb (ready, listening, thinking or speaking), the meeting clock, the current agenda item with its timebox, the next item and any running timer. Below that is a caption strip with her last spoken line, then three summary cards showing what she has picked up: **Decisions**, **Actions** (with owner and due date) and **Tracked** items from the active skills (or the parking lot). Each card shows the latest items.
+**Aria's video tile: a clean, live intelligence HUD.** Rendered by the bot and streamed into the meeting at 15 fps, so everyone sees it without opening anything. A slim top bar carries presence, the meeting title, the active agenda timebox and clock. Beneath it, the **Skills** strip shows active specialist skills — starting lean at join and lighting up dynamically (`✦`) as the conversation shifts across domains — alongside live **Alignment** and **Voices** pills. The main split gives primary room to **Live intelligence** (sourced **Work IQ** evidence from Microsoft 365, **Skill** insights, and **Risk** / **Alignment** alerts) beside a unified **Outcomes** column for **Decisions**, **Actions** and **Specialist tracking**. See [`docs/crisis-demo-script.md`](docs/crisis-demo-script.md) for a 4-minute crisis walkthrough where skills and Work IQ trigger automatically from conversation.
+
+![Aria's live tile: slim top bar, four active crisis skills, Work IQ evidence cards and structured outcomes](docs/media/tile-live.png)
 
 ![Aria's facilitator tile: speaking, construction skills active, agenda item 2 of 4 with 1:30 left, a running timer, caption, and Decisions, Actions and Tracked cards](docs/media/tile-sample.png)
 
@@ -20,9 +22,9 @@ Ask for detail ("Aria, show us the actions") and the tile switches to a full lis
 
 <img src="docs/media/tile-actions.png" alt="Breakdown view listing every action with owner and due date" width="480"> <img src="docs/media/tile-overrun.png" alt="Overview with an overrunning agenda item, meeting over time, and the external-guest banner" width="480">
 
-**Live insights and knowledge.** The fourth card shows what Aria has noticed: risks nobody owns, people talking past each other, a topic going round in circles. It also shows what she has **found in your Microsoft 365 data through Work IQ while you talk**, each item with its source. **Vision:** hold a sketch up to your webcam, or share your screen, and say "Aria, capture this". The image and her analysis appear on the tile, any actions or decisions written on it join the notes, and it is embedded in the recap email.
+**Live insights, knowledge and vision.** The **Live intelligence** panel shows what Aria has noticed — risks nobody owns, alignment gaps, and specialist skill alerts — alongside sourced **Work IQ** findings from your Microsoft 365 data. Ask for `"Aria, show the insights"` for the full-screen breakdown, or hold a sketch up to your webcam / share your screen and say `"Aria, capture this"`: the image and her analysis appear on the tile, any written actions or decisions join **Outcomes**, and the capture is embedded in the recap email.
 
-<img src="docs/media/tile-insights.png" alt="Insights breakdown: a Work IQ finding with its source, and an alignment gap" width="480"> <img src="docs/media/tile-capture.png" alt="Capture view: an image with its title, summary and key points" width="480">
+<img src="docs/media/tile-insights.png" alt="Insights breakdown: Work IQ findings with citations and a Legal Compliance skill alert" width="480"> <img src="docs/media/tile-capture.png" alt="Capture view: an image with its title, summary and key points" width="480">
 
 *Sample renders from the same code that streams into the call (sample data).*
 
@@ -78,12 +80,14 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Speaks in the meeting** | Realtime speech-to-speech through Azure AI Voice Live (`gpt-realtime-2.1`), with server echo cancellation and noise suppression. Teams audio is 16 kHz PCM end to end, so nothing is resampled. |
 | **Answers only when addressed** | Continuous transcription. A reply starts only when the agent's name is said as a whole word. The same speaker can ask a follow-up within 10 s without repeating the name. |
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
-| **Meeting memory** | A text model folds the conversation into running notes every 45 s: summary, decisions, action items and open questions. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
+| **Meeting memory** | A text model folds the conversation into running notes every 15 s: summary, decisions, action items, open questions and an alignment score. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
+| **Live panel** | The tile and a companion browser dashboard show alignment, speaking share, a feed of skill, risk and Work IQ insights, and the notes, updating as people talk. Nobody has to @mention anything: Aria raises what matters on screen, not in the chat. |
+| **Companion dashboard** | Aria posts a link in the meeting chat to `/live/<callId>`. It shows the live intelligence feed (`All`, `Work IQ`, `Skills` and `Risks` filters), structured **Outcomes**, the live transcript, alignment, voices and active skills (with light/dark toggle). Access is by an unguessable per-call key in the link fragment, sent as a header; it stops working when the call ends, and organisation-sourced findings are hidden while an external guest is present. |
 | **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `show_on_screen`, `look_at`, `capture_visual`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
 | **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
 | **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
-| **Live insights** | Each scribe pass can raise up to two facilitator insights (risk, alignment, facilitation, pace), colour-coded by severity on the tile. If the conversation moves into another domain, Aria switches on the matching skill and says so. |
-| **Live knowledge (Work IQ)** | When a fact from outside the meeting would help ("what did we agree with the steel supplier?"), Aria asks Work IQ in the background and puts a short, sourced answer on the tile. Rate-limited to one lookup every 2 minutes, and switched off while an external guest is present. |
+| **Live insights** | Each scribe pass can raise up to three insights (skill, risk, alignment, facilitation, pace), tagged by source and severity on the tile. When the conversation moves into another domain, Aria switches on the matching specialist skill on screen automatically. |
+| **Live knowledge (Work IQ)** | When a fact from outside the meeting would help, Aria searches Microsoft 365 in the background via `workiq_retrieve` (~7 s semantic index search, falling back to `workiq_ask` if needed) and puts short, sourced cards in the feed. Switched off while an external guest is present. |
 | **Vision** | `look_at` answers a question about the screen share or whatever the speaker holds up to their camera. `capture_visual` records it: title, summary, key points, plus any actions, decisions and tracked items written on it. The image is shown on the tile and embedded in the email. Frames are taken on demand only. |
 | **Chat** | Every meeting-chat message goes into the notes, so actions typed in chat are picked up. Aria replies only when @mentioned. |
 | **Work IQ** | Mail, calendar, files, chats and people lookups through the Work IQ MCP server, run as a delegated service account. |
@@ -122,7 +126,7 @@ Guidance in plain English: run order, what to probe, what never to say...
 | `checklist` | What a good meeting of this kind covers. Items are ticked off live (`mark_covered`). Anything uncovered is raised in the wrap-up warning and listed in the recap as "Not covered this time". |
 | body | Behaviour guidance appended to the voice and chat instructions, for example "open with safety" or "never state a contractual position as fact". |
 
-**Built-in skills:** `construction-project`, `project-delivery` (RAID and governance), `agile-sprint`, `client-sales` (MEDDICC), `incident-review` (blameless post-incident review).
+**Built-in skills:** `construction-project`, `project-delivery` (RAID and governance), `agile-sprint`, `client-sales` (MEDDICC), `incident-review` (blameless post-incident review), `crisis-manager`, `ransomware-incident-response` (defensive response room), `strategy-consultant` and `legal-compliance`. The last four are ported from the Offline Neural Facilitator. Active skills feed the scribe their guidance, so it raises **Skill** insights specific to the discussion, not just generic notes.
 
 **Customer skills** layer one organisation's or project's context on top of a domain skill: the people, the contract, key dates, and what matters most. [`samples/skills/riverside-phase2`](samples/skills/riverside-phase2/SKILL.md) is a fictional example for a housing scheme under an NEC4 contract. Drop it into the custom skills folder, and any meeting mentioning "Riverside" picks it up automatically; or say "Aria, use the Riverside skill".
 
@@ -205,7 +209,7 @@ flowchart LR
 
 | Port | Direction | Purpose |
 | --- | --- | --- |
-| 443/TCP | Inbound | HTTPS signalling: Graph call notifications, Bot Framework chat activities, operator API. Every route requires a token. |
+| 443/TCP | Inbound | HTTPS signalling: Graph call notifications, Bot Framework chat activities, operator API, and per-call companion dashboard. |
 | 8445/TCP | Inbound | Teams real-time media (native media platform, mutual TLS). |
 | 80/TCP | Inbound | Let's Encrypt HTTP-01 challenge only (win-acme renewals). |
 | 3389/TCP | Inbound | RDP, restricted to `allowedManagementCidrs` (empty by default). |
@@ -231,7 +235,7 @@ sequenceDiagram
     Bot->>Ch: install app in chat, post join notice
     Bot->>VL: spoken introduction
     loop every 5 s
-        Bot->>TX: every 45 s: fold new turns into notes
+        Bot->>TX: every 15 s: fold new turns into notes
         Bot->>VL: time checks at 50% and T-5 min
         Note over Bot: roster change → external-guest policy<br/>alone for 60 s → leave
     end
@@ -292,7 +296,7 @@ sequenceDiagram
 | `Facilitator/MeetingAgendaLoader.cs` | Finds the meeting in the agent account's calendar and extracts the agenda and timeboxes from the invite. |
 | `Facilitator/SkillLibrary.cs`, `MeetingSkill.cs` | Loads profiles and `SKILL.md` files (built-in and custom), selects skills per meeting, and renders them into instructions. |
 | `Facilitator/MeetingContext.cs` | The meeting's durable state: transcript turns, participants and attendees, talk time, notes, briefing renderer. |
-| `Facilitator/MeetingScribe.cs` | Rolling notes every 45 s, and the final report with insights. |
+| `Facilitator/MeetingScribe.cs` | Rolling notes every 15 s (with alignment, skill insights and Work IQ questions), and the final report with insights. |
 | `Facilitator/MeetingToolset.cs` | Local facilitator tools plus the MCP catalogue, with restricted-mode filtering **and** enforcement at dispatch. |
 | `Facilitator/MeetingMailer.cs` | Resolves internal attendees and sends the HTML report through Graph `sendMail`. All content is HTML-encoded. |
 | `Facilitator/TextModelClient.cs` | Minimal Azure OpenAI v1 chat-completions client (JSON mode, tool loop, vision) on the managed identity. |
@@ -301,6 +305,7 @@ sequenceDiagram
 | `Controllers/MeetingsController.cs` | Operator API: join, leave, say, list. |
 | `Controllers/PlatformCallController.cs` | Graph calling webhook. The SDK validates Graph's token on every notification. |
 | `Tools/ToolCatalog.cs` | MCP client connections (Work IQ and any extras) and tool-call spans. |
+| `Controllers/LiveController.cs`, `LivePage.cs` | The companion dashboard: a static page plus a key-protected JSON state endpoint per live call. |
 | `Tools/DelegatedTokenProvider.cs` | Redeems the service account's refresh token for Work IQ and Graph scopes and persists rotations. |
 | `Tools/AgentUserTokenProvider.cs` | Acquires tokens as the Agent 365 AI teammate (Entra Agent ID user flow, managed identity as the blueprint credential), falling back to the service account. |
 | `Teams/CalendarAutoJoinService.cs` | Polls Aria's own calendar and joins Teams meetings she is invited to as they start. |
@@ -404,7 +409,7 @@ The blueprint also needs a federated identity credential trusting the media host
 
 | Concern | Control |
 | --- | --- |
-| Public endpoints | Every route needs a token. `/api/calling` is validated by the Graph Communications SDK, `/api/messages` by a Bot Framework JWT scheme (issuer `https://api.botframework.com`, audience = app id, keys from Bot Framework OpenID metadata), and the operator API by Entra JWT plus the `RtBot.Operate` role or `Meetings.Join` scope. Only `/api/health` is anonymous. |
+| Public endpoints | Every route needs a token. `/api/calling` is validated by the Graph Communications SDK, `/api/messages` by a Bot Framework JWT scheme (issuer `https://api.botframework.com`, audience = app id, keys from Bot Framework OpenID metadata), and the operator API by Entra JWT plus the `RtBot.Operate` role or `Meetings.Join` scope. Only `/api/health` and the static `/live/{callId}` shell are anonymous; `/api/live/{callId}` requires the unguessable per-call `X-Live-Key` header. |
 | Token exfiltration via `serviceUrl` | Chat replies go only to `*.botframework.com` and `*.trafficmanager.net` hosts. |
 | Secrets at rest | No secrets in the repo or in configuration files. The client secret and the Work IQ refresh token are DPAPI-encrypted with the **machine** key on the VM (unreadable if copied off it). AI Services uses the managed identity. |
 | External participants | When anyone not provably internal is present, organisation-data tools are removed from the model's tool list **and** refused at dispatch, for both voice and chat. The model's instructions are not the security boundary. Policy options are `Restrict` (default), `Leave` or `Allow`. |
@@ -517,7 +522,7 @@ All settings are under `RtBot` in [`appsettings.json`](src/RtBot/appsettings.jso
 | `Tools:TeamsAppCatalogId` | | Catalogue id installed into each meeting chat. |
 | `Facilitator:ExternalParticipants` | `Restrict` | `Allow`, `Restrict` or `Leave`. |
 | `Facilitator:ScribeModel` | `gpt-5.4-mini` | Chat deployment for notes, report and chat answers. |
-| `Facilitator:ScribeIntervalSeconds` | `45` | Notes cadence. |
+| `Facilitator:ScribeIntervalSeconds` | `15` | Notes cadence. |
 | `Facilitator:WrapUpWarningMinutes` | `5` | End-of-meeting warning. |
 | `Facilitator:PostRecapOnEnd` | `true` | Chat recap. |
 | `Facilitator:EmailRecapOnEnd` | `true` | Email report to internal attendees. |

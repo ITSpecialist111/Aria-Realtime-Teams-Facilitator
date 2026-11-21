@@ -336,8 +336,9 @@ public sealed class MeetingToolset
                         return Error($"No skill called '{name}'.");
                     }
 
-                    if (_meeting.ActivateSkill(skill))
+                    if (_meeting.ActivateSkill(skill, dynamic: true))
                     {
+                        _meeting.AddInsight(new MeetingInsight("skill", "info", $"Skill activated: {MeetingContext.Titleise(skill.Name)}", skill.Description, MeetingContext.Titleise(skill.Name), DateTimeOffset.UtcNow));
                         await _actions.SkillsChangedAsync(ct).ConfigureAwait(false);
                     }
 

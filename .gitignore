@@ -4,6 +4,8 @@ obj/
 artifacts/
 node_modules/
 apps/aria-console/dist/
+apps/aria-console/ms.config.json
+apps/aria-console/memory-bank.md
 src/RtBot/wwwroot/console/
 *.tsbuildinfo
 .env*.local

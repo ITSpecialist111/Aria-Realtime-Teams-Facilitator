@@ -54,7 +54,14 @@ public sealed class AvatarController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> Status([FromQuery] string? callId, CancellationToken cancellationToken)
     {
-        if (!await IsAuthorizedForAvatarAsync(callId).ConfigureAwait(false))
+        bool isOperator = false;
+        if (User.Identity?.IsAuthenticated == true)
+        {
+            AuthorizationResult auth = await _authorization.AuthorizeAsync(User, null, AuthorizationPolicies.Operator).ConfigureAwait(false);
+            isOperator = auth.Succeeded;
+        }
+
+        if (!isOperator && !await IsAuthorizedForAvatarAsync(callId).ConfigureAwait(false))
         {
             return Unauthorized();
         }
@@ -65,7 +72,9 @@ public sealed class AvatarController : ControllerBase
             configured = !string.IsNullOrWhiteSpace(apiKey),
             agentId = ResolveSavedAgentId(),
             voiceId = _avatar.VoiceId,
+            callVoice = _voice.VoiceName,
             agentName = _voice.AgentName,
+            showcaseKey = isOperator ? ResolveOrCreateShowcaseKey() : null,
         });
     }
 
@@ -197,16 +206,29 @@ public sealed class AvatarController : ControllerBase
     private async Task<bool> IsAuthorizedForAvatarAsync(string? callId)
     {
         string liveKey = Request.Headers["X-Live-Key"].ToString();
-        if (!string.IsNullOrEmpty(callId) &&
-            !string.IsNullOrEmpty(liveKey) &&
-            _calling.TryGetHandler(callId, out CallHandler? handler) &&
-            handler is not null)
+        if (!string.IsNullOrEmpty(liveKey))
         {
-            byte[] given = Encoding.UTF8.GetBytes(liveKey);
-            byte[] expected = Encoding.UTF8.GetBytes(handler.Meeting.ViewKey);
-            if (given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected))
+            if (!string.IsNullOrEmpty(callId) &&
+                _calling.TryGetHandler(callId, out CallHandler? handler) &&
+                handler is not null)
             {
-                return true;
+                byte[] given = Encoding.UTF8.GetBytes(liveKey);
+                byte[] expected = Encoding.UTF8.GetBytes(handler.Meeting.ViewKey);
+                if (given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected))
+                {
+                    return true;
+                }
+            }
+
+            if ((string.IsNullOrEmpty(callId) || callId.StartsWith("showcase-", StringComparison.Ordinal)) &&
+                ResolveOrCreateShowcaseKey() is { Length: > 0 } showcaseKey)
+            {
+                byte[] given = Encoding.UTF8.GetBytes(liveKey);
+                byte[] expected = Encoding.UTF8.GetBytes(showcaseKey);
+                if (given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected))
+                {
+                    return true;
+                }
             }
         }
 
@@ -217,6 +239,32 @@ public sealed class AvatarController : ControllerBase
         }
 
         return false;
+    }
+
+    private string? ResolveOrCreateShowcaseKey()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        string? existing = ProtectedSecretFile.TryRead(_avatar.ShowcaseKeyFile, _logger);
+        if (!string.IsNullOrWhiteSpace(existing))
+        {
+            return existing.Trim();
+        }
+
+        string generated = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(24));
+        try
+        {
+            ProtectedSecretFile.Write(_avatar.ShowcaseKeyFile, generated);
+            return generated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist showcase key.");
+            return null;
+        }
     }
 
     private string? ResolveApiKey()
@@ -338,56 +386,46 @@ public sealed class AvatarController : ControllerBase
                                 return id;
                             }
                         }
-
-                        string? firstId = agents.FirstOrDefault()?["id"]?.GetValue<string>();
-                        if (!string.IsNullOrWhiteSpace(firstId))
-                        {
-                            _cachedAgentId = firstId;
-                            PersistAgentId(firstId);
-                            return firstId;
-                        }
                     }
                 }
             }
 
-            // Provision a default Aria agent using a public D-ID Clips presenter and SoniaNeural voice.
-            string? presenterId = await TryPickPublicPresenterAsync(http, cancellationToken).ConfigureAwait(false);
-            var createBody = new JsonObject
-            {
-                ["preview_name"] = _voice.AgentName,
-                ["embed"] = true,
-                ["presenter"] = new JsonObject
+            // Provision a dedicated Aria agent using D-ID V4 Expressive presenter + Ada British neural voice,
+            // falling back to a V3 Clips presenter if expressive avatars are unavailable on the account plan.
+            string? createdId = await TryCreateDidAgentAsync(
+                http,
+                new JsonObject
                 {
-                    ["type"] = "clip",
-                    ["presenter_id"] = presenterId ?? "amy-jcwCkr1grs",
+                    ["type"] = "expressive",
+                    ["presenter_id"] = "public_mia_elegant@avt_TJ0Tq5",
+                    ["background"] = new JsonObject { ["color"] = "#0A0D12" },
                     ["voice"] = new JsonObject
                     {
                         ["type"] = "microsoft",
                         ["voice_id"] = _avatar.VoiceId,
                     },
                 },
-                ["llm"] = new JsonObject
-                {
-                    ["provider"] = "openai",
-                    ["model"] = "gpt-4.1-mini",
-                    ["instructions"] = $"You are {_voice.AgentName}, a concise British executive AI meeting facilitator. Answer in at most two crisp sentences.",
-                },
-            };
+                cancellationToken).ConfigureAwait(false);
 
-            using HttpRequestMessage createReq = new(HttpMethod.Post, $"{DidBaseUrl}/agents")
+            if (string.IsNullOrWhiteSpace(createdId))
             {
-                Content = new StringContent(createBody.ToJsonString(), Encoding.UTF8, "application/json"),
-            };
-
-            using HttpResponseMessage createResp = await http.SendAsync(createReq, cancellationToken).ConfigureAwait(false);
-            if (!createResp.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("D-ID agent auto-create returned HTTP {Status}.", (int)createResp.StatusCode);
-                return null;
+                string? clipPresenter = await TryPickPublicPresenterAsync(http, cancellationToken).ConfigureAwait(false);
+                createdId = await TryCreateDidAgentAsync(
+                    http,
+                    new JsonObject
+                    {
+                        ["type"] = "clip",
+                        ["presenter_id"] = clipPresenter ?? "v2_public_Amber@0zSz8kflCN",
+                        ["background"] = new JsonObject { ["color"] = "#0A0D12" },
+                        ["voice"] = new JsonObject
+                        {
+                            ["type"] = "microsoft",
+                            ["voice_id"] = _avatar.VoiceId,
+                        },
+                    },
+                    cancellationToken).ConfigureAwait(false);
             }
 
-            JsonNode? created = JsonNode.Parse(await createResp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
-            string? createdId = created?["id"]?.GetValue<string>();
             if (!string.IsNullOrWhiteSpace(createdId))
             {
                 _cachedAgentId = createdId;
@@ -400,6 +438,41 @@ public sealed class AvatarController : ControllerBase
         {
             _agentGate.Release();
         }
+    }
+
+    private async Task<string?> TryCreateDidAgentAsync(
+        HttpClient http,
+        JsonObject presenter,
+        CancellationToken cancellationToken)
+    {
+        var createBody = new JsonObject
+        {
+            ["preview_name"] = _voice.AgentName,
+            ["embed"] = true,
+            ["greetings"] = new JsonArray($"Hello, I'm {_voice.AgentName}, your executive meeting facilitator."),
+            ["presenter"] = presenter,
+            ["llm"] = new JsonObject
+            {
+                ["provider"] = "openai",
+                ["model"] = "gpt-4.1-mini",
+                ["instructions"] = $"You are {_voice.AgentName}, a concise British executive AI meeting facilitator. Answer in at most two crisp sentences.",
+            },
+        };
+
+        using HttpRequestMessage createReq = new(HttpMethod.Post, $"{DidBaseUrl}/agents")
+        {
+            Content = new StringContent(createBody.ToJsonString(), Encoding.UTF8, "application/json"),
+        };
+
+        using HttpResponseMessage createResp = await http.SendAsync(createReq, cancellationToken).ConfigureAwait(false);
+        if (!createResp.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("D-ID agent auto-create ({PresenterType}) returned HTTP {Status}.", presenter["type"]?.GetValue<string>(), (int)createResp.StatusCode);
+            return null;
+        }
+
+        JsonNode? created = JsonNode.Parse(await createResp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+        return created?["id"]?.GetValue<string>();
     }
 
     private static async Task<string?> TryPickPublicPresenterAsync(HttpClient http, CancellationToken cancellationToken)

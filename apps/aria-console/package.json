@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@microsoft/cmr-apps-vite-plugin": "^1.0.2",
+    "@microsoft/cmr-cli": "1.0.1",
     "@tailwindcss/vite": "^4.1.8",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.5",

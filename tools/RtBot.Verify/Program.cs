@@ -78,7 +78,7 @@ static async Task<int> VerifyStreamAsync(string[] args)
             CreateResponse = false,
             InterruptResponse = true,
         },
-        Voice = new AzureStandardVoice("en-GB-SoniaNeural"),
+        Voice = new AzureStandardVoice("en-GB-Ada:DragonHDLatestNeural"),
     };
 
     options.Modalities.Clear();
@@ -194,7 +194,7 @@ static async Task<int> VerifyVoiceLiveAsync(string[] args)
 
     string endpoint = args[1];
     string model = args[2];
-    string voice = args.Length > 3 ? args[3] : "en-GB-SoniaNeural";
+    string voice = args.Length > 3 ? args[3] : "en-GB-Ada:DragonHDLatestNeural";
 
     Console.WriteLine($"Endpoint : {endpoint}");
     Console.WriteLine($"Model    : {model}");

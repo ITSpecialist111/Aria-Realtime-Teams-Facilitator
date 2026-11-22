@@ -108,8 +108,8 @@ public sealed class VoiceOptions
 
     public string Model { get; set; } = "gpt-realtime-2.1";
 
-    /// <summary>Azure neural voice name. Falls back to an OpenAI voice when empty.</summary>
-    public string VoiceName { get; set; } = "en-GB-SoniaNeural";
+    /// <summary>Azure neural or DragonHD voice name. Falls back to an OpenAI voice when empty.</summary>
+    public string VoiceName { get; set; } = "en-GB-Ada:DragonHDLatestNeural";
 
     public string Instructions { get; set; } = string.Empty;
 
@@ -313,8 +313,11 @@ public sealed class AvatarOptions
     /// <summary>Optional Companion App URL (for example a deployed Copilot Managed Runtime app URL).</summary>
     public string CompanionAppUrl { get; set; } = string.Empty;
 
-    /// <summary>Microsoft Azure Neural voice used by D-ID so the avatar matches Aria's call voice.</summary>
-    public string VoiceId { get; set; } = "en-GB-SoniaNeural";
+    /// <summary>DPAPI-encrypted per-host showcase key allowing authorised standalone/CMR preview sessions.</summary>
+    public string ShowcaseKeyFile { get; set; } = @"C:\rtbot\state\showcase.secret";
+
+    /// <summary>Microsoft Azure Neural voice used by D-ID so the avatar matches Aria's Ada HD persona.</summary>
+    public string VoiceId { get; set; } = "en-GB-AdaMultilingualNeural";
 
     /// <summary>Explicit origins allowed when minting short-lived D-ID client keys.</summary>
     public string[] AllowedDomains { get; set; } = [];

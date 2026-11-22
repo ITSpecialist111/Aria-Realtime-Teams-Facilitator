@@ -41,7 +41,7 @@ export function PresenceStage({
     "idle" | "connecting" | "connected" | "speaking" | "unconfigured" | "error"
   >("idle");
   const [didNote, setDidNote] = useState<string>(
-    "60fps GSAP Radial Voice Aura · en-GB-SoniaNeural",
+    "60fps GSAP Radial Voice Aura · en-GB-Ada:DragonHDLatestNeural",
   );
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [liveSpeechText, setLiveSpeechText] = useState<string | null>(null);
@@ -122,7 +122,7 @@ export function PresenceStage({
       videoRef.current.removeAttribute("src");
     }
     setDidStatus("idle");
-    setDidNote("60fps GSAP Radial Voice Aura · en-GB-SoniaNeural");
+    setDidNote("60fps GSAP Radial Voice Aura · en-GB-Ada:DragonHDLatestNeural");
     if (mgr) {
       void mgr.disconnect().catch(() => undefined);
     }
@@ -251,7 +251,7 @@ export function PresenceStage({
       }
 
       setDidStatus("connected");
-      setDidNote("D-ID WebRTC Live · Microsoft en-GB-SoniaNeural");
+      setDidNote("D-ID WebRTC Live · Ada HD (en-GB)");
     } catch {
       if (!mountedRef.current) return;
       setDidStatus("unconfigured");
@@ -313,7 +313,8 @@ export function PresenceStage({
       const utter = new SpeechSynthesisUtterance(textToSpeak);
       const voices = window.speechSynthesis.getVoices();
       const british =
-        voices.find((v) => v.name.includes("Sonia")) ??
+        voices.find((v) => v.name.includes("Ada")) ??
+        voices.find((v) => v.lang === "en-GB" && /female|libby|sonia/i.test(v.name)) ??
         voices.find((v) => v.lang === "en-GB");
       if (british) utter.voice = british;
       utter.rate = 1.03;

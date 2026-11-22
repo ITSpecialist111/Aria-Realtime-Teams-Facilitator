@@ -87,12 +87,12 @@ export function FinOpsTelemetryDrawer({
       id: "did-avatar",
       layer: "5 · D-ID Humanoid WebRTC Stream (Optional)",
       model: avatarVideoActive
-        ? "D-ID LiveKit + SoniaNeural"
+        ? "D-ID LiveKit + Ada HD"
         : "60fps GSAP Aura (Default)",
       rateLabel: avatarVideoActive ? "$0.0850 / min" : "$0.0000 / min",
       thisCallUsd: avatarVideoActive ? finops.audioMinutes * 0.085 : 0,
       detail:
-        "Zero-cost 60fps GSAP SVG Radial Voice Aura runs by default. Executive Humanoid WebRTC lip-sync (`en-GB-SoniaNeural`) activates strictly on demand via ephemeral 1h client keys.",
+        "Zero-cost 60fps GSAP SVG Radial Voice Aura runs by default. Executive Humanoid WebRTC lip-sync (`en-GB-AdaMultilingualNeural` paired with `en-GB-Ada:DragonHDLatestNeural`) activates strictly on demand via ephemeral 1h client keys.",
     },
     {
       id: "media-vm",

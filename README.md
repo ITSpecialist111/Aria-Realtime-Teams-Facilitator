@@ -82,7 +82,7 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
 | **Meeting memory** | A text model folds the conversation into running notes every 15 s: summary, decisions, action items, open questions and an alignment score. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
 | **Live panel** | The tile and a companion browser dashboard show alignment, speaking share, a feed of skill, risk and Work IQ insights, and the notes, updating as people talk. Nobody has to @mention anything: Aria raises what matters on screen, not in the chat. |
-| **Companion workspace (Copilot Managed Runtime + D-ID + GSAP)** | `apps/aria-console` is a React 19 + TypeScript + Tailwind v4 + GSAP (`Flip` + `quickSetter`) companion workspace built on the **Microsoft Copilot Managed Runtime SDK** (`@microsoft/cmr-apps`) and infused with the **D-ID Agents SDK** (`@d-id/client-sdk`). It pairs a calm Swiss Clinical Editorial overview (Warm Alabaster Paper & Deep Obsidian) with progressive unfolding: click any single-line insight to GSAP-`Flip` unfold verbatim M365 citations and a 3-node provenance trace, scrub clickable timeline milestones, inspect camera/whiteboard topology on the **Spatial Evidence Canvas**, stream a lip-synced **D-ID Humanoid Avatar** (`en-GB-SoniaNeural`, with zero-cost 60fps GSAP Radial Voice Aura fallback), and open the **Executive FinOps Drawer** (*"What's the cost of this?"*) for live unit economics (`$0.018/min` core Voice+IQ) and an interactive 100-seat monthly TCO model. |
+| **Companion workspace (Copilot Managed Runtime + D-ID + GSAP)** | `apps/aria-console` is a React 19 + TypeScript + Tailwind v4 + GSAP (`Flip` + `quickSetter`) companion workspace built on the **Microsoft Copilot Managed Runtime SDK** (`@microsoft/cmr-apps`) and infused with the **D-ID Agents SDK** (`@d-id/client-sdk`). It pairs a calm Swiss Clinical Editorial overview (Warm Alabaster Paper & Deep Obsidian) with progressive unfolding: click any single-line insight to GSAP-`Flip` unfold verbatim M365 citations and a 3-node provenance trace, scrub clickable timeline milestones, inspect camera/whiteboard topology on the **Spatial Evidence Canvas**, stream a lip-synced **D-ID Humanoid Avatar** (`en-GB-AdaMultilingualNeural` paired with `en-GB-Ada:DragonHDLatestNeural`, with zero-cost 60fps GSAP Radial Voice Aura fallback), and open the **Executive FinOps Drawer** (*"What's the cost of this?"*) for live unit economics (`$0.018/min` core Voice+IQ) and an interactive 100-seat monthly TCO model. |
 | **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `schedule_followup_meeting`, `show_on_screen`, `look_at`, `capture_visual`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
 | **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
 | **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
@@ -515,7 +515,7 @@ All settings are under `RtBot` in [`appsettings.json`](src/RtBot/appsettings.jso
 | `Voice:Endpoint` | | AI Services endpoint. |
 | `Voice:Model` | `gpt-realtime-2.1` | Voice Live model. |
 | `Voice:TranscriptionModel` | `azure-speech` | Supports a phrase list, which matters for name recognition. |
-| `Voice:VoiceName` | `en-GB-SoniaNeural` | Azure neural voice. |
+| `Voice:VoiceName` | `en-GB-Ada:DragonHDLatestNeural` | Azure Speech DragonHD voice. |
 | `Voice:AgentName` / `NameAliases` | `Aria` | Name the agent answers to, plus recogniser misspellings. |
 | `Voice:FollowUpWindowSeconds` | `10` | Follow-ups without the name. |
 | `Tools:WorkIqMcpUrl` | Work IQ endpoint | MCP server. |
@@ -532,7 +532,7 @@ All settings are under `RtBot` in [`appsettings.json`](src/RtBot/appsettings.jso
 | `Facilitator:Profile` | `default` | Instance profile (`profiles/<name>.md`). Plain name only. |
 | `Facilitator:CustomSkillsPath` | `C:\rtbot\skills` | Custom skills and profiles; overrides built-ins by name. |
 | `Avatar:ApiKeyFile` | `C:\rtbot\state\did.secret` | DPAPI-encrypted D-ID Basic API key used to mint 1-hour domain-scoped client keys. |
-| `Avatar:VoiceId` | `en-GB-SoniaNeural` | Azure neural voice matched between Teams audio and D-ID WebRTC video. |
+| `Avatar:VoiceId` | `en-GB-AdaMultilingualNeural` | Azure neural voice matched to Aria's Ada HD call persona for D-ID WebRTC video. |
 | `Avatar:CompanionAppUrl` | | Optional Copilot Managed Runtime App Player URL (`https://play.managedapps.cloud.microsoft/apps/<appId>`). |
 | `Observability:EnableAgent365` | `false` | Agent 365 export. |
 | `Observability:ApplicationInsightsConnectionString` | | Optional second sink. |
@@ -552,7 +552,7 @@ npm run dev
 # 2. Onboard & run in the Copilot Managed Runtime App Player (requires tenant sign-in)
 npm install -g @microsoft/cmr-cli@latest
 ms auth login
-ms app init --display-name "Aria Executive Companion"
+ms app init --display-name "Aria Executive Companion" --repo none
 ms app dev
 
 # 3. Optional: encrypt your D-ID API key into Windows DPAPI on vm-rtbot (never stored in git or browser bundles)
@@ -560,7 +560,7 @@ cd ../..
 ./scripts/Set-DidAvatarKey.ps1
 ```
 
-When no D-ID key is present, `PresenceStage` runs the zero-cost **60fps GSAP SVG Radial Voice Aura** automatically. When `did.secret` is configured on the host, `POST /api/avatar/session` mints a short-lived (`3600 s`), origin-locked D-ID `client_key` (never exposing your Basic API key to the browser) and streams lip-synced WebRTC video in `en-GB-SoniaNeural`.
+When no D-ID key is present, `PresenceStage` runs the zero-cost **60fps GSAP SVG Radial Voice Aura** automatically. When `did.secret` is configured on the host, `POST /api/avatar/session` mints a short-lived (`3600 s`), origin-locked D-ID `client_key` (never exposing your Basic API key to the browser) and streams lip-synced WebRTC video in `en-GB-AdaMultilingualNeural`.
 
 ---
 

@@ -51,8 +51,14 @@ function resolveCallCoordinates(): {
   const hashParams = new URLSearchParams(
     window.location.hash.replace(/^#/, ""),
   );
-  const liveKey = hashParams.get("k");
-  const apiBaseUrl = resolveTrustedApiHost(params.get("host"));
+  const devShowcaseKey = import.meta.env.DEV
+    ? ((import.meta.env.VITE_SHOWCASE_KEY as string | undefined) ?? null)
+    : null;
+  const liveKey = hashParams.get("k") ?? (callId ? null : devShowcaseKey);
+  const envHost = import.meta.env.DEV
+    ? ((import.meta.env.VITE_RTBOT_URL as string | undefined) ?? null)
+    : null;
+  const apiBaseUrl = resolveTrustedApiHost(params.get("host") ?? envHost);
 
   return { callId, liveKey, apiBaseUrl };
 }

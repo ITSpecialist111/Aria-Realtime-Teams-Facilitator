@@ -1,0 +1,18 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/copilot-managed-runtime/config/v0.0/schema.json",
+  "version": "0.0",
+  "appId": "00000000-0000-0000-0000-000000000000",
+  "appDisplayName": "Aria Executive Companion",
+  "environmentId": "00000000-0000-0000-0000-000000000000",
+  "description": "Aria Executive Intelligence & Facilitation Workspace",
+  "repoType": "none",
+  "cloud": "public",
+  "buildPath": "./dist",
+  "buildCommand": "npm run build",
+  "buildEntryPoint": "index.html",
+  "localAppUrl": "http://localhost:3000",
+  "connectionReferences": {},
+  "appSettings": {
+    "showHeader": true
+  }
+}

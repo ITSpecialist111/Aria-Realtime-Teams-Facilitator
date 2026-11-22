@@ -220,8 +220,7 @@ public sealed class AvatarController : ControllerBase
                 }
             }
 
-            if ((string.IsNullOrEmpty(callId) || callId.StartsWith("showcase-", StringComparison.Ordinal)) &&
-                ResolveOrCreateShowcaseKey() is { Length: > 0 } showcaseKey)
+            if (ResolveOrCreateShowcaseKey() is { Length: > 0 } showcaseKey)
             {
                 byte[] given = Encoding.UTF8.GetBytes(liveKey);
                 byte[] expected = Encoding.UTF8.GetBytes(showcaseKey);

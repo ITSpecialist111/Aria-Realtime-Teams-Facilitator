@@ -52,19 +52,52 @@ az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
 
 if (Test-Path 'src/RtBot/wwwroot/console/index.html') {
     Write-Host '==> uploading compiled companion console assets' -ForegroundColor Cyan
-    Compress-Archive -Path 'src/RtBot/wwwroot/console/*' -DestinationPath 'artifacts/console.zip' -Force
-    $consoleB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('artifacts/console.zip'))
-    $chunkSize = 180000
-    for ($offset = 0; $offset -lt $consoleB64.Length; $offset += $chunkSize) {
-        $len = [Math]::Min($chunkSize, $consoleB64.Length - $offset)
-        $slice = $consoleB64.Substring($offset, $len)
-        $mode = if ($offset -eq 0) { 'Set-Content' } else { 'Add-Content' }
-        $chunkScript = "$mode -Path 'C:\rtbot\console.b64' -Value '$slice' -NoNewline"
-        $chunkScript | Set-Content 'artifacts/push-console-chunk.ps1' -Encoding UTF8
+    $hasVendorOnHost = (az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
+        --scripts "Write-Output (Test-Path 'C:\rtbot\app\wwwroot\console\assets\livekit-client*.js')" `
+        --query "value[0].message" -o tsv) -match 'True'
+
+    if ($hasVendorOnHost) {
+        $deltaStage = 'artifacts/console-delta'
+        Remove-Item $deltaStage,'artifacts/console-delta.zip' -Recurse -Force -EA SilentlyContinue
+        $consoleRoot = (Resolve-Path 'src/RtBot/wwwroot/console').Path
+        Get-ChildItem $consoleRoot -Recurse -File |
+            Where-Object { $_.Name -notmatch '\.woff2$|^(react-vendor|livekit-client|cmr-sdk|gsap)-' } |
+            ForEach-Object {
+                $dst = Join-Path $deltaStage $_.FullName.Substring($consoleRoot.Length + 1)
+                New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+                Copy-Item $_.FullName $dst
+            }
+        Compress-Archive -Path "$deltaStage/*" -DestinationPath 'artifacts/console-delta.zip' -Force
+        $deltaB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('artifacts/console-delta.zip'))
+        $unpackDelta = @"
+`$ErrorActionPreference='Stop'
+New-Item -ItemType Directory -Force -Path 'C:\rtbot\stage\wwwroot\console' | Out-Null
+Copy-Item 'C:\rtbot\app\wwwroot\console\*' 'C:\rtbot\stage\wwwroot\console' -Recurse -Force
+[IO.File]::WriteAllBytes('C:\rtbot\delta.zip', [Convert]::FromBase64String('$deltaB64'))
+Expand-Archive -Path 'C:\rtbot\delta.zip' -DestinationPath 'C:\rtbot\stage\wwwroot\console' -Force
+Remove-Item 'C:\rtbot\delta.zip' -Force -EA SilentlyContinue
+Write-Output 'CONSOLE_DELTA_OK'
+"@
+        $unpackDelta | Set-Content 'artifacts/unpack-console.ps1' -Encoding UTF8
         az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
-            --scripts '@artifacts/push-console-chunk.ps1' -o none
+            --scripts '@artifacts/unpack-console.ps1' -o json |
+            ConvertFrom-Json | Select-Object -ExpandProperty value |
+            Select-Object -ExpandProperty message
     }
-    $unpackConsole = @"
+    else {
+        Compress-Archive -Path 'src/RtBot/wwwroot/console/*' -DestinationPath 'artifacts/console.zip' -Force
+        $consoleB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('artifacts/console.zip'))
+        $chunkSize = 180000
+        for ($offset = 0; $offset -lt $consoleB64.Length; $offset += $chunkSize) {
+            $len = [Math]::Min($chunkSize, $consoleB64.Length - $offset)
+            $slice = $consoleB64.Substring($offset, $len)
+            $mode = if ($offset -eq 0) { 'Set-Content' } else { 'Add-Content' }
+            $chunkScript = "$mode -Path 'C:\rtbot\console.b64' -Value '$slice' -NoNewline"
+            $chunkScript | Set-Content 'artifacts/push-console-chunk.ps1' -Encoding UTF8
+            az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
+                --scripts '@artifacts/push-console-chunk.ps1' -o none
+        }
+        $unpackConsole = @"
 `$ErrorActionPreference='Stop'
 [IO.File]::WriteAllBytes('C:\rtbot\console.zip', [Convert]::FromBase64String([IO.File]::ReadAllText('C:\rtbot\console.b64')))
 New-Item -ItemType Directory -Force -Path 'C:\rtbot\stage\wwwroot\console' | Out-Null
@@ -72,11 +105,12 @@ Expand-Archive -Path 'C:\rtbot\console.zip' -DestinationPath 'C:\rtbot\stage\www
 Remove-Item 'C:\rtbot\console.b64','C:\rtbot\console.zip' -Force -EA SilentlyContinue
 Write-Output 'CONSOLE_ASSETS_OK'
 "@
-    $unpackConsole | Set-Content 'artifacts/unpack-console.ps1' -Encoding UTF8
-    az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
-        --scripts '@artifacts/unpack-console.ps1' -o json |
-        ConvertFrom-Json | Select-Object -ExpandProperty value |
-        Select-Object -ExpandProperty message
+        $unpackConsole | Set-Content 'artifacts/unpack-console.ps1' -Encoding UTF8
+        az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
+            --scripts '@artifacts/unpack-console.ps1' -o json |
+            ConvertFrom-Json | Select-Object -ExpandProperty value |
+            Select-Object -ExpandProperty message
+    }
 }
 
 Write-Host '==> restarting service' -ForegroundColor Cyan

@@ -105,6 +105,21 @@ export function TopCommandBar({
             {cmr.hostedInCmr ? "CMR Managed App · Live" : "CMR Runtime SDK · v1.0"}
           </span>
 
+          {isLiveConnected && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold font-mono-tabular border shrink-0"
+              style={{
+                backgroundColor:
+                  "color-mix(in oklch, var(--accent-emerald) 14%, transparent)",
+                borderColor:
+                  "color-mix(in oklch, var(--accent-emerald) 45%, transparent)",
+                color: "var(--accent-emerald)",
+              }}
+            >
+              ● LIVE TEAMS CALL
+            </span>
+          )}
+
           <h1
             className="text-sm font-medium truncate"
             style={{ color: "var(--text-primary)" }}

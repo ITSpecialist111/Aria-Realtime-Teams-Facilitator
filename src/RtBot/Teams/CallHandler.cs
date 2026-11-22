@@ -814,12 +814,12 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             """,
             cancellationToken).ConfigureAwait(false);
 
-        await _bridge.AnnounceAsync(
-            $"Introduce yourself in one sentence as {name}, the AI facilitator. Say you're taking notes, and people can ask you anything by saying your name." +
-            (Meeting.SnapshotAgenda().Current is { } first
-                ? $" Then say you have the agenda from the invite, {Meeting.SnapshotAgenda().Items.Count} items, starting with '{first.Title}', and you'll keep time."
-                : string.Empty),
-            cancellationToken).ConfigureAwait(false);
+        AgendaStatus openingAgenda = Meeting.SnapshotAgenda();
+        string greetingInstruction = openingAgenda.Current is { } first
+            ? $"Introduce yourself in one crisp sentence as {name}, the AI facilitator for '{Meeting.Subject ?? "today's session"}'. Confirm you already have the {openingAgenda.Items.Count}-item agenda from the invite and walk us straight into item 1: '{first.Title}'{(first.Minutes is { } fm ? $" ({fm:0.#} minutes)" : string.Empty)}, inviting the group to kick off. NEVER ask what the agenda is."
+            : $"Introduce yourself in one sentence as {name}, the AI facilitator. Say you're taking notes and people can address you by name at any time.";
+
+        await _bridge.AnnounceAsync(greetingInstruction, cancellationToken).ConfigureAwait(false);
 
         _noticeGiven = true;
         _logger.LogInformation("Join notice given. Chat={Posted}", posted);

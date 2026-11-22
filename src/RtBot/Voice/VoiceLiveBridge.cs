@@ -47,6 +47,8 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
     private DateTimeOffset _responseStartedAt;
     private DateTimeOffset _lastAgentReplyAt = DateTimeOffset.MinValue;
     private string? _lastAddressedBy;
+    private int _briefingSeq;
+    private string? _lastBriefingItemId;
 
     public VoiceLiveBridge(VoiceOptions options, VoiceLiveClient client, ILogger<VoiceLiveBridge> logger)
     {
@@ -165,8 +167,9 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
         }
 
         string extra = $"""
-            You are speaking up unprompted, not answering anyone. Ignore the last thing that was said.
-            Say only this, in one short natural sentence, without calling any tools: {instruction}
+            You are speaking up unprompted as the facilitator, not answering a question. Ignore any background audio.
+            Do NOT call any tools. Speak naturally in one or two crisp sentences following this instruction:
+            {instruction}
             """;
 
         await RespondAsync(session, extra, cancellationToken).ConfigureAwait(false);
@@ -178,6 +181,7 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
             .StartSessionAsync(_options.Model, cancellationToken)
             .ConfigureAwait(false);
 
+        _lastBriefingItemId = null;
         await session.ConfigureSessionAsync(BuildSessionOptions(), cancellationToken).ConfigureAwait(false);
 
         // After a reconnect the new session has heard nothing; seed it with what the meeting has
@@ -295,6 +299,7 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
         {
             Model = _options.Model,
             Instructions = (string.IsNullOrWhiteSpace(_options.Instructions) ? DefaultInstructions() : _options.Instructions) +
+                RenderMeetingHeader() +
                 (_meeting is null ? string.Empty : SkillLibrary.RenderInstructions(_meeting.Profile, _meeting.ActiveSkills)),
 
             InputAudioFormat = InputAudioFormat.Pcm16,
@@ -362,8 +367,10 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
          - Never read out more than three items. Summarise aloud and put the detail in the meeting chat with post_to_meeting_chat.
          - Use people's names. Do not narrate what you are about to do; do it and report the result.
 
-         What you do as facilitator:
-         - Keep time. When someone states an agenda or asks you to run one, call set_agenda (with timeboxes if given).
+         WhRun the agenda and keep time. If an Agenda is already present in your instructions or meeting state (loaded from the invite),
+           NEVER ask what the agenda is — you already have it. Walk the group through the items in order, announce the active item and
+           its timebox, advance with next_agenda_item when the group moves on or asks for the next item, and extend with extend_agenda_item
+           if requested. Only call set_agenda when no agenda is loaded yet or someone explicitly asks to replace itxes if given).
            Move on with next_agenda_item when the group moves on; give more time with extend_agenda_item.
            When a topic drifts off-agenda, offer to park it and call park_topic.
          - Track the meeting: when someone takes on a task, call record_action_item and confirm it in a few words.
@@ -387,6 +394,26 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
          Never invent names, dates, figures or document contents. If you are unsure, say so.
          Do not repeat sensitive detail unnecessarily, and never read out credentials.
          """;
+
+    private string RenderMeetingHeader()
+    {
+        if (_meeting is null)
+        {
+            return string.Empty;
+        }
+
+        AgendaStatus agenda = _meeting.SnapshotAgenda();
+        string subject = string.IsNullOrWhiteSpace(_meeting.Subject) ? string.Empty : $"\nMeeting title: {_meeting.Subject}";
+        if (agenda.Items.Count == 0)
+        {
+            return subject.Length == 0 ? string.Empty : $"\n\n## Loaded meeting context{subject}\n";
+        }
+
+        string items = string.Join(
+            "\n",
+            agenda.Items.Select((a, idx) => $"  {idx + 1}. {a.Title}{(a.Minutes is { } m ? $" ({m:0.#} min)" : string.Empty)}"));
+        return $"\n\n## Loaded meeting context{subject}\nAgenda loaded from the meeting invite (already set — walk the group through these items in order and NEVER ask what the agenda is):\n{items}\n";
+    }
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
@@ -563,9 +590,31 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
 
         try
         {
-            await session.StartResponseAsync(
-                $"{situation}\n\nCurrent meeting state:\n{briefing}{restricted}",
-                cancellationToken).ConfigureAwait(false);
+            // StartResponseAsync(string) serialises top-level `additional_instructions`, which gpt-realtime-2.1
+            // ignores. Injecting a replaceable SystemMessageItem guarantees the model sees the live agenda,
+            // clock, participants, insights, and facilitator instruction on every turn.
+            if (_lastBriefingItemId is { } prevId)
+            {
+                _lastBriefingItemId = null;
+                try
+                {
+                    await session.DeleteItemAsync(prevId, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Safe to ignore if item already scrolled out or session reconnected.
+                }
+            }
+
+            string itemId = $"rtbot-brief-{Interlocked.Increment(ref _briefingSeq)}";
+            SystemMessageItem stateItem = new($"{situation}\n\nCurrent meeting state:\n{briefing}{restricted}")
+            {
+                Id = itemId,
+            };
+            await session.AddItemAsync(stateItem, cancellationToken).ConfigureAwait(false);
+            _lastBriefingItemId = itemId;
+
+            await session.StartResponseAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

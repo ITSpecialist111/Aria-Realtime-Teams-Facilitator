@@ -3,6 +3,7 @@ bin/
 obj/
 artifacts/
 node_modules/
+.ms/
 apps/aria-console/dist/
 apps/aria-console/ms.config.json
 apps/aria-console/memory-bank.md

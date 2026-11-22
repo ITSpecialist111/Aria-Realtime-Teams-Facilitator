@@ -55,10 +55,7 @@ function resolveCallCoordinates(): {
     ? ((import.meta.env.VITE_SHOWCASE_KEY as string | undefined) ?? null)
     : null;
   const liveKey = hashParams.get("k") ?? (callId ? null : devShowcaseKey);
-  const envHost = import.meta.env.DEV
-    ? ((import.meta.env.VITE_RTBOT_URL as string | undefined) ?? null)
-    : null;
-  const apiBaseUrl = resolveTrustedApiHost(params.get("host") ?? envHost);
+  const apiBaseUrl = resolveTrustedApiHost(params.get("host"));
 
   return { callId, liveKey, apiBaseUrl };
 }
@@ -116,20 +113,25 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [autoAdvancing, liveState]);
 
-  // Poll live meeting state when opened with a live callId + fragment key
+  // Poll live meeting state: either a specific callId from a Teams chat link, or /api/live/active in CMR / Console
   useEffect(() => {
-    if (!coords.callId || !coords.liveKey) return;
+    if (!coords.liveKey) return;
     let cancelled = false;
+    const endpoint = coords.callId
+      ? `${coords.apiBaseUrl}/api/live/${encodeURIComponent(coords.callId)}`
+      : `${coords.apiBaseUrl}/api/live/active`;
 
     async function poll() {
       try {
-        const resp = await fetch(
-          `${coords.apiBaseUrl}/api/live/${encodeURIComponent(coords.callId!)}`,
-          {
-            headers: { "X-Live-Key": coords.liveKey! },
-          },
-        );
-        if (!resp.ok || cancelled) return;
+        const resp = await fetch(endpoint, {
+          headers: { "X-Live-Key": coords.liveKey! },
+        });
+        if (cancelled) return;
+        if (resp.status === 204 || resp.status === 404) {
+          setLiveState(null);
+          return;
+        }
+        if (!resp.ok) return;
         const raw = (await resp.json()) as Partial<LiveMeetingState> & {
           insights?: Array<
             Omit<MeetingInsightItem, "id" | "elapsedSec"> & {
@@ -156,7 +158,7 @@ export function App() {
         );
 
         setLiveState({
-          callId: raw.callId ?? coords.callId!,
+          callId: raw.callId ?? coords.callId ?? "active",
           agent: raw.agent ?? "Aria",
           subject: raw.subject ?? "Live Microsoft Teams Session",
           restricted: Boolean(raw.restricted),

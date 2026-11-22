@@ -27,17 +27,20 @@ public sealed class LiveController : ControllerBase
     private readonly TeamsCallingService _calling;
     private readonly VoiceOptions _voice;
     private readonly FacilitatorOptions _facilitator;
+    private readonly AvatarOptions _avatar;
     private readonly IWebHostEnvironment _env;
 
     public LiveController(
         TeamsCallingService calling,
         VoiceOptions voice,
         FacilitatorOptions facilitator,
+        AvatarOptions avatar,
         IWebHostEnvironment env)
     {
         _calling = calling;
         _voice = voice;
         _facilitator = facilitator;
+        _avatar = avatar;
         _env = env;
     }
 
@@ -60,6 +63,27 @@ public sealed class LiveController : ControllerBase
         return Content(LivePage.Html, "text/html; charset=utf-8");
     }
 
+    [HttpGet("api/live/active")]
+    public IActionResult Active()
+    {
+        if (!MatchesShowcaseKey(Request.Headers["X-Live-Key"].ToString()))
+        {
+            return Unauthorized();
+        }
+
+        Harden();
+        CallHandler? handler = _calling.ActiveHandlers
+            .OrderByDescending(h => h.Meeting.JoinedAt)
+            .FirstOrDefault();
+
+        if (handler is null)
+        {
+            return NoContent();
+        }
+
+        return Ok(BuildStatePayload(handler.Meeting.CallId, handler));
+    }
+
     [HttpGet("api/live/{callId}")]
     public IActionResult State(string callId)
     {
@@ -70,6 +94,11 @@ public sealed class LiveController : ControllerBase
         }
 
         Harden();
+        return Ok(BuildStatePayload(callId, handler));
+    }
+
+    private object BuildStatePayload(string callId, CallHandler handler)
+    {
         MeetingContext m = handler.Meeting;
         MeetingNotes notes = m.SnapshotNotes();
         AgendaStatus agenda = m.SnapshotAgenda();
@@ -89,7 +118,7 @@ public sealed class LiveController : ControllerBase
         double workIqCostUsd = Math.Round(workIqCalls * 0.0025, 4);
         double totalLiveCostUsd = Math.Round(voiceCostUsd + scribeCostUsd + workIqCostUsd, 4);
 
-        return Ok(new
+        return new
         {
             callId,
             agent = handler.AgentName,
@@ -178,7 +207,7 @@ public sealed class LiveController : ControllerBase
             }),
             searching = restricted ? null : m.Searching,
             transcript = m.RecentTurns(40).Select(t => new { at = t.At, speaker = t.Speaker, text = t.Text, agent = t.IsAgent }),
-        });
+        };
     }
 
     [HttpGet("api/live/{callId}/visuals/{index:int}")]
@@ -225,7 +254,30 @@ public sealed class LiveController : ControllerBase
 
         byte[] given = Encoding.UTF8.GetBytes(key);
         byte[] expected = Encoding.UTF8.GetBytes(handler.Meeting.ViewKey);
-        return given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected) ? handler : null;
+        if (given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected))
+        {
+            return handler;
+        }
+
+        return MatchesShowcaseKey(key) ? handler : null;
+    }
+
+    private bool MatchesShowcaseKey(string? key)
+    {
+        if (string.IsNullOrEmpty(key) || !OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        string? stored = ProtectedSecretFile.TryRead(_avatar.ShowcaseKeyFile);
+        if (string.IsNullOrWhiteSpace(stored))
+        {
+            return false;
+        }
+
+        byte[] given = Encoding.UTF8.GetBytes(key);
+        byte[] expected = Encoding.UTF8.GetBytes(stored.Trim());
+        return given.Length == expected.Length && CryptographicOperations.FixedTimeEquals(given, expected);
     }
 
     private void Harden()

@@ -21,12 +21,18 @@ public sealed class MeetingMailer
     private const int MaxRecipients = 100;
 
     private readonly IDelegatedTokenProvider _tokens;
+    private readonly RtBot.Configuration.AgentIdentityOptions _agentIdentity;
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<MeetingMailer> _logger;
 
-    public MeetingMailer(IDelegatedTokenProvider tokens, IHttpClientFactory httpFactory, ILogger<MeetingMailer> logger)
+    public MeetingMailer(
+        IDelegatedTokenProvider tokens,
+        RtBot.Configuration.AgentIdentityOptions agentIdentity,
+        IHttpClientFactory httpFactory,
+        ILogger<MeetingMailer> logger)
     {
         _tokens = tokens;
+        _agentIdentity = agentIdentity;
         _httpFactory = httpFactory;
         _logger = logger;
     }
@@ -38,6 +44,7 @@ public sealed class MeetingMailer
             .Select(a => a.UserId!)
             .Append(meeting.OrganizerUserId)
             .OfType<string>()
+            .Where(id => !_agentIdentity.Enabled || !string.Equals(id, _agentIdentity.AgentUserId, StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(MaxRecipients);
 
@@ -102,7 +109,9 @@ public sealed class MeetingMailer
                     ["contentBytes"] = Convert.ToBase64String(allVisuals[i].Jpeg),
                 })]),
             },
-            ["saveToSentItems"] = true,
+            // Keeping AI recaps out of Aria's own Sent Items prevents Work IQ indexing her own
+            // unverified meeting summaries over authoritative playbooks and policies.
+            ["saveToSentItems"] = false,
         };
 
         using HttpRequestMessage request = new(HttpMethod.Post, "https://graph.microsoft.com/v1.0/me/sendMail")

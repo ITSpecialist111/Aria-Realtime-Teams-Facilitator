@@ -73,6 +73,7 @@ builder.Services.PostConfigure<RtBotOptions>(o => o.Media.CertificateThumbprint 
 ConfigureKestrel(builder, options.Media);
 
 builder.Services.AddSingleton(options.AzureAd);
+builder.Services.AddSingleton(options.Media);
 builder.Services.AddSingleton(options.Voice);
 builder.Services.AddSingleton(options.Tools);
 builder.Services.AddHttpClient();
@@ -138,11 +139,39 @@ builder.Services.AddSingleton<IDelegatedTokenProvider>(sp =>
         sp.GetRequiredService<ILogger<AgentUserTokenProvider>>());
 });
 builder.Services.AddSingleton(options.AgentIdentity);
+builder.Services.AddSingleton(options.Avatar);
 builder.Services.AddHostedService<CalendarAutoJoinService>();
 builder.Services.AddSingleton(options.Facilitator);
+HashSet<string> extraOrigins = new(StringComparer.OrdinalIgnoreCase);
+foreach (string d in options.Avatar.AllowedDomains)
+{
+    if (RtBot.Controllers.AvatarController.TryNormalizeOperatorOrigin(d, out string? norm))
+    {
+        extraOrigins.Add(norm!);
+    }
+}
+if (!string.IsNullOrWhiteSpace(options.Media.ServiceFqdn) &&
+    RtBot.Controllers.AvatarController.TryNormalizeOperatorOrigin($"https://{options.Media.ServiceFqdn}", out string? hostNorm))
+{
+    extraOrigins.Add(hostNorm!);
+}
+
+builder.Services.AddCors(cors =>
+{
+    cors.AddPolicy("CmrWorkspace", policy =>
+    {
+        policy
+            .SetIsOriginAllowed(origin =>
+                RtBot.Controllers.AvatarController.TryNormalizeAllowedOrigin(origin, out _) ||
+                (RtBot.Controllers.AvatarController.TryNormalizeOperatorOrigin(origin, out string? candidate) && extraOrigins.Contains(candidate!)))
+            .WithMethods("GET", "POST", "OPTIONS")
+            .WithHeaders("Content-Type", "X-Live-Key", "Authorization");
+    });
+});
 builder.Services.AddSingleton<BotChatClient>();
 builder.Services.AddSingleton<MeetingDetailsLookup>();
 builder.Services.AddSingleton<MeetingMailer>();
+builder.Services.AddSingleton<MeetingScheduler>();
 builder.Services.AddSingleton<MeetingAgendaLoader>();
 builder.Services.AddSingleton<SkillLibrary>();
 builder.Services.AddSingleton(sp => new TextModelClient(
@@ -171,6 +200,8 @@ builder.Services.AddHostedService<BotStartupService>();
 
 WebApplication app = builder.Build();
 
+app.UseStaticFiles();
+app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();

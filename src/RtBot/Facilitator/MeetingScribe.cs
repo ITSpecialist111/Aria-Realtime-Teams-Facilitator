@@ -95,6 +95,12 @@ public sealed class MeetingScribe
             return ScribeOutcome.None;
         }
 
+        if (!turns.Any(t => !t.IsAgent))
+        {
+            meeting.MarkTurnsScribed(through);
+            return ScribeOutcome.None;
+        }
+
         MeetingNotes current = meeting.SnapshotNotes();
         IReadOnlyList<MeetingSkill> skills = meeting.ActiveSkills;
         string categories = string.Join(", ", skills.SelectMany(s => s.Track).Distinct(StringComparer.OrdinalIgnoreCase));

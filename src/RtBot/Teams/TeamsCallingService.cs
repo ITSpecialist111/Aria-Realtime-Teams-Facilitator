@@ -215,6 +215,7 @@ public sealed class TeamsCallingService : IAsyncDisposable
                 _services.GetRequiredService<BotChatClient>(),
                 _services.GetRequiredService<MeetingDetailsLookup>(),
                 _services.GetRequiredService<MeetingMailer>(),
+                _services.GetRequiredService<MeetingScheduler>(),
                 _services.GetRequiredService<MeetingAgendaLoader>(),
                 _services.GetRequiredService<SkillLibrary>(),
                 _options,

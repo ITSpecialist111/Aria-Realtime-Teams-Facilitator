@@ -56,7 +56,7 @@ public sealed class MeetingToolset
     public IReadOnlyList<ToolSpec> AvailableSpecs()
     {
         IEnumerable<ToolSpec> remote = _catalog.Specs.Where(s => !_meeting.IsRestricted || !s.AccessesOrganisationData);
-        IEnumerable<ToolSpec> local = _local.Values.Select(t => t.Spec);
+        IEnumerable<ToolSpec> local = _local.Values.Select(t => t.Spec).Where(s => !_meeting.IsRestricted || !s.AccessesOrganisationData);
         return [.. local, .. remote];
     }
 
@@ -74,6 +74,12 @@ public sealed class MeetingToolset
     {
         if (_local.TryGetValue(name, out LocalTool? local))
         {
+            if (local.Spec.AccessesOrganisationData && _meeting.IsRestricted)
+            {
+                _logger.LogWarning("Refused local tool {Tool}: an external participant is present.", name);
+                return Error("Organisation calendar and directory actions are unavailable while someone from outside the organisation is in the meeting.");
+            }
+
             JsonElement args = Parse(argumentsJson);
             try
             {
@@ -366,13 +372,42 @@ public sealed class MeetingToolset
                 return posted ? Ok("Recap posted to the chat.") : Error("The meeting chat is not available.");
             });
 
+        Add(
+            "schedule_followup_meeting",
+            "Book a real Teams follow-up or checkpoint meeting on the calendar and email invites to everyone in this meeting plus any extra email addresses mentioned (including spoken addresses like 'alex at contoso dot com'). Always use this instead of record_action_item when asked to set up, book or schedule a follow-up meeting.",
+            """
+            {"type":"object","properties":{
+              "subject":{"type":"string","description":"Meeting title; omit for '<current subject> - Checkpoint'"},
+              "start_in_minutes":{"type":"number","minimum":2,"maximum":10080,"description":"Minutes from now until start (e.g. 60 for 'in an hour')"},
+              "start_at_utc":{"type":"string","description":"ISO-8601 UTC start time if a specific date/clock time was stated instead of a relative offset"},
+              "duration_minutes":{"type":"number","minimum":5,"maximum":240,"description":"Duration in minutes (default 15)"},
+              "additional_attendees":{"type":"array","items":{"type":"string"},"description":"Any extra email addresses mentioned (spoken 'at'/'dot' forms accepted)"},
+              "agenda":{"type":"array","items":{"type":"string"},"description":"Short agenda items for the follow-up"}},
+             "required":["duration_minutes"]}
+            """,
+            async (args, ct) =>
+            {
+                double? inMins = args.TryGetProperty("start_in_minutes", out JsonElement sm) && sm.TryGetDouble(out double d1) ? d1 : null;
+                double dur = args.TryGetProperty("duration_minutes", out JsonElement dm) && dm.TryGetDouble(out double d2) ? d2 : 15;
+                List<string> extras = ElementStrings(args, "additional_attendees");
+                List<string> agenda = ElementStrings(args, "agenda");
+
+                ScheduledFollowUp res = await _actions.ScheduleFollowUpAsync(
+                    Opt(args, "subject"), inMins, Opt(args, "start_at_utc"), dur, extras, agenda, ct).ConfigureAwait(false);
+
+                return res.Succeeded
+                    ? JsonSerializer.Serialize(new { ok = true, summary = res.Summary, start_utc = res.StartUtc, attendees = res.Attendees, join_url = res.JoinUrl })
+                    : Error(res.Summary);
+            },
+            accessesOrganisationData: true);
+
         if (_visionEnabled)
         {
-            const string sourceSchema = "\"source\":{\"type\":\"string\",\"enum\":[\"camera\",\"screen\"],\"description\":\"camera: something held up to the speaker's webcam (paper, whiteboard, object). screen: the active screen share.\"}";
+            const string sourceSchema = "\"source\":{\"type\":\"string\",\"enum\":[\"camera\",\"screen\"],\"description\":\"camera: something physically held up to the speaker's webcam (paper, whiteboard, object). screen: another participant's active Teams screen share.\"}";
 
             Add(
                 "look_at",
-                "Look at the active screen share or at what the current speaker is holding up to their camera, and answer a question about it. Use for 'this slide', 'on screen', 'what I'm holding up', 'this drawing'. Does not record anything.",
+                "Look at another participant's active Teams screen share or physical webcam object. NEVER use look_at when someone refers to insights, playbooks, policies, skills, actions or notes 'on screen' or 'on the board' — that means YOUR OWN video tile HUD, which is already in your briefing and get_meeting_status.",
                 "{\"type\":\"object\",\"properties\":{" + sourceSchema + ",\"question\":{\"type\":\"string\",\"description\":\"What to find out\"}},\"required\":[\"source\",\"question\"]}",
                 async (args, ct) =>
                 {
@@ -473,8 +508,18 @@ public sealed class MeetingToolset
             });
     }
 
-    private void Add(string name, string description, string schema, Func<JsonElement, CancellationToken, Task<string>> handler) =>
-        _local[name] = new LocalTool(new ToolSpec(name, description, schema, AccessesOrganisationData: false), handler);
+    private void Add(
+        string name,
+        string description,
+        string schema,
+        Func<JsonElement, CancellationToken, Task<string>> handler,
+        bool accessesOrganisationData = false) =>
+        _local[name] = new LocalTool(new ToolSpec(name, description, schema, AccessesOrganisationData: accessesOrganisationData), handler);
+
+    private static List<string> ElementStrings(JsonElement args, string name) =>
+        args.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Array
+            ? [.. v.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!.Trim()).Where(s => s.Length > 0)]
+            : [];
 
     private static JsonElement Parse(string json)
     {

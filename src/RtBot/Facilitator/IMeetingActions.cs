@@ -15,4 +15,14 @@ public interface IMeetingActions
 
     /// <summary>Re-applies instructions after the active skills change.</summary>
     Task SkillsChangedAsync(CancellationToken cancellationToken);
+
+    /// <summary>Books a real Teams follow-up meeting and sends calendar invites from Aria's mailbox.</summary>
+    Task<ScheduledFollowUp> ScheduleFollowUpAsync(
+        string? subject,
+        double? startInMinutes,
+        string? startAtIso,
+        double durationMinutes,
+        IReadOnlyList<string> additionalAttendees,
+        IReadOnlyList<string> agendaItems,
+        CancellationToken cancellationToken);
 }

@@ -12,6 +12,7 @@ public sealed class RtBotOptions
     public FacilitatorOptions Facilitator { get; set; } = new();
     public ObservabilityOptions Observability { get; set; } = new();
     public AgentIdentityOptions AgentIdentity { get; set; } = new();
+    public AvatarOptions Avatar { get; set; } = new();
 }
 
 /// <summary>
@@ -253,8 +254,11 @@ public sealed class FacilitatorOptions
     /// <summary>Participant utterances needed before a recap email is worth sending.</summary>
     public int MinTurnsForEmail { get; set; } = 3;
 
-    /// <summary>Leave once no humans have been present for this long.</summary>
+    /// <summary>Leave once no humans have been present for this long after attendees have arrived.</summary>
     public int LeaveWhenAloneSeconds { get; set; } = 60;
+
+    /// <summary>How long to wait in an empty room for the first human to arrive before giving up.</summary>
+    public int WaitForFirstAttendeeMinutes { get; set; } = 15;
 
     /// <summary>Read the shared screen when asked. Uses the scribe model's vision.</summary>
     public bool EnableScreenVision { get; set; } = true;
@@ -290,4 +294,28 @@ public sealed class ObservabilityOptions
     public string ClientSecret { get; set; } = string.Empty;
 
     public string ApplicationInsightsConnectionString { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Optional D-ID humanoid avatar integration for the Copilot Managed Runtime companion workspace.
+/// When unconfigured, the console falls back cleanly to the 60fps GSAP radial voice aura.
+/// </summary>
+public sealed class AvatarOptions
+{
+    public string ApiKey { get; set; } = string.Empty;
+
+    /// <summary>DPAPI-encrypted D-ID Basic API key (`username:password`) stored on the host.</summary>
+    public string ApiKeyFile { get; set; } = @"C:\rtbot\state\did.secret";
+
+    /// <summary>Optional pre-provisioned D-ID Agent ID (`agt_...`).</summary>
+    public string AgentId { get; set; } = string.Empty;
+
+    /// <summary>Optional Companion App URL (for example a deployed Copilot Managed Runtime app URL).</summary>
+    public string CompanionAppUrl { get; set; } = string.Empty;
+
+    /// <summary>Microsoft Azure Neural voice used by D-ID so the avatar matches Aria's call voice.</summary>
+    public string VoiceId { get; set; } = "en-GB-SoniaNeural";
+
+    /// <summary>Explicit origins allowed when minting short-lived D-ID client keys.</summary>
+    public string[] AllowedDomains { get; set; } = [];
 }

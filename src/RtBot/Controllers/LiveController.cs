@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
+using RtBot.Configuration;
 using RtBot.Facilitator;
 using RtBot.Teams;
 
@@ -9,7 +11,7 @@ namespace RtBot.Controllers;
 
 /// <summary>
 /// A companion dashboard for a live call: the same notes, insights and Work IQ findings that
-/// appear on Aria's video tile, in a full browser window.
+/// appear on Aria's video tile, in a full browser window or Copilot Managed Runtime player.
 /// </summary>
 /// <remarks>
 /// Anonymous by design, because meeting attendees do not hold tokens for this app. Access is by
@@ -18,18 +20,41 @@ namespace RtBot.Controllers;
 /// are withheld, the same rule the tile and tools follow.
 /// </remarks>
 [ApiController]
+[EnableCors("CmrWorkspace")]
 [AllowAnonymous]
 public sealed class LiveController : ControllerBase
 {
     private readonly TeamsCallingService _calling;
+    private readonly VoiceOptions _voice;
+    private readonly FacilitatorOptions _facilitator;
+    private readonly IWebHostEnvironment _env;
 
-    public LiveController(TeamsCallingService calling) => _calling = calling;
+    public LiveController(
+        TeamsCallingService calling,
+        VoiceOptions voice,
+        FacilitatorOptions facilitator,
+        IWebHostEnvironment env)
+    {
+        _calling = calling;
+        _voice = voice;
+        _facilitator = facilitator;
+        _env = env;
+    }
 
     [HttpGet("live/{callId}")]
-    public IActionResult Page(string callId)
+    [HttpGet("console")]
+    public IActionResult Page(string? callId = null)
     {
         // The page holds no data; the key travels in the URL fragment and is sent to the API as a header.
         Harden();
+        string spaPath = Path.Combine(_env.WebRootPath ?? Path.Combine(AppContext.BaseDirectory, "wwwroot"), "console", "index.html");
+        if (System.IO.File.Exists(spaPath))
+        {
+            Response.Headers.ContentSecurityPolicy =
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data: blob: https://*.d-id.com https://*.amazonaws.com; media-src 'self' blob: https://*.d-id.com; connect-src 'self' https://api.d-id.com wss://notifications.d-id.com wss://*.livekit.cloud https://*.livekit.cloud; base-uri 'self'; form-action 'none'; frame-ancestors 'self' https://*.managedapps.cloud.microsoft https://*.island.powerplatformusercontent.com";
+            return PhysicalFile(spaPath, "text/html; charset=utf-8");
+        }
+
         Response.Headers.ContentSecurityPolicy =
             "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
         return Content(LivePage.Html, "text/html; charset=utf-8");
@@ -56,18 +81,39 @@ public sealed class LiveController : ControllerBase
             insights = insights.Where(i => !i.Kind.Equals("knowledge", StringComparison.OrdinalIgnoreCase));
         }
 
+        double audioMinutes = Math.Max(0.1, m.Elapsed.TotalMinutes);
+        int scribePasses = m.ScribePassCount;
+        int workIqCalls = m.WorkIqCallCount;
+        double voiceCostUsd = Math.Round(audioMinutes * 0.0108, 4);
+        double scribeCostUsd = Math.Round(scribePasses * 0.00055, 4);
+        double workIqCostUsd = Math.Round(workIqCalls * 0.0025, 4);
+        double totalLiveCostUsd = Math.Round(voiceCostUsd + scribeCostUsd + workIqCostUsd, 4);
+
         return Ok(new
         {
+            callId,
             agent = handler.AgentName,
             subject = m.Subject,
             restricted,
+            presence = handler.Presence.ToString().ToLowerInvariant(),
+            speaking = handler.IsAgentSpeaking,
+            caption = handler.LatestCaption,
             elapsed = (int)m.Elapsed.TotalSeconds,
             remaining = m.Remaining is { } r ? (int?)r.TotalSeconds : null,
             alignment = m.Alignment,
             alignmentNote = m.AlignmentNote,
             trend = m.AlignmentTrend,
             voices = m.Voices().Select(v => new { name = v.Name, share = v.Share }),
-            skills = m.ActiveSkillBadges.Select(s => new { name = s.Name, label = s.Label, description = s.Description, dynamic = s.Dynamic, at = s.ActivatedAt }),
+            skills = m.ActiveSkillDetails.Select(s => new
+            {
+                name = s.Name,
+                label = s.Label,
+                description = s.Description,
+                dynamic = s.Dynamic,
+                at = s.ActivatedAt,
+                checklist = s.Checklist.Select(c => new { item = c.Item, covered = c.Covered }),
+                tracks = s.Track,
+            }),
             uncovered = m.UncoveredChecklist,
             agenda = new
             {
@@ -81,7 +127,7 @@ public sealed class LiveController : ControllerBase
                 currentElapsed = (int)agenda.CurrentElapsed.TotalSeconds,
                 done = agenda.Completed,
             },
-            milestones = m.Milestones.TakeLast(10).Select(ms => new
+            milestones = m.Milestones.TakeLast(12).Select(ms => new
             {
                 label = ms.Label,
                 at = (int)ms.AtElapsed.TotalSeconds,
@@ -93,18 +139,81 @@ public sealed class LiveController : ControllerBase
             questions = notes.OpenQuestions,
             parked = m.ParkingLot,
             tracked = m.Tracked,
+            visuals = restricted
+                ? Array.Empty<object>()
+                : m.Visuals.Select((v, idx) => (object)new
+                {
+                    index = idx,
+                    title = v.Title,
+                    summary = v.Summary,
+                    keyPoints = v.KeyPoints,
+                    source = v.Source,
+                    capturedFrom = v.CapturedFrom,
+                    at = v.At,
+                }).ToArray(),
+            finops = new
+            {
+                voiceModel = _voice.Model,
+                scribeModel = _facilitator.ScribeModel,
+                audioMinutes = Math.Round(audioMinutes, 2),
+                scribePasses,
+                workIqCalls,
+                workIqAvgMs = m.WorkIqAvgLatencyMs,
+                voiceCostUsd,
+                scribeCostUsd,
+                workIqCostUsd,
+                totalLiveCostUsd,
+                costPerMinuteUsd = Math.Round(totalLiveCostUsd / Math.Max(1.0, audioMinutes), 4),
+            },
             insights = insights.TakeLast(40).Select(i => new
             {
+                id = $"{i.At.ToUnixTimeMilliseconds()}-{i.Kind}-{Math.Abs(StringComparer.Ordinal.GetHashCode(i.Title))}",
                 kind = i.Kind,
                 severity = i.Severity,
                 title = i.Title,
                 text = i.Text,
                 citation = i.Citation,
                 at = i.At,
+                elapsedSec = Math.Max(0, (int)(i.At - m.JoinedAt).TotalSeconds),
             }),
             searching = restricted ? null : m.Searching,
             transcript = m.RecentTurns(40).Select(t => new { at = t.At, speaker = t.Speaker, text = t.Text, agent = t.IsAgent }),
         });
+    }
+
+    [HttpGet("api/live/{callId}/visuals/{index:int}")]
+    public IActionResult VisualJpeg(string callId, int index)
+    {
+        CallHandler? handler = Find(callId, Request.Headers["X-Live-Key"].ToString());
+        if (handler is null || handler.Meeting.IsRestricted)
+        {
+            return NotFound();
+        }
+
+        IReadOnlyList<VisualNote> visuals = handler.Meeting.Visuals;
+        if (index < 0 || index >= visuals.Count || visuals[index].Jpeg.Length == 0)
+        {
+            return NotFound();
+        }
+
+        Harden();
+        return File(visuals[index].Jpeg, "image/jpeg");
+    }
+
+    [HttpPost("api/live/{callId}/summary")]
+    public async Task<IActionResult> SpeakBoardSummary(
+        string callId,
+        CancellationToken cancellationToken)
+    {
+        CallHandler? handler = Find(callId, Request.Headers["X-Live-Key"].ToString());
+        if (handler is null)
+        {
+            return NotFound();
+        }
+
+        Harden();
+        string speech = await handler.SynthesiseBoardSummaryAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { speech });
     }
 
     private CallHandler? Find(string callId, string? key)

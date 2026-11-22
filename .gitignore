@@ -2,6 +2,11 @@
 bin/
 obj/
 artifacts/
+node_modules/
+apps/aria-console/dist/
+src/RtBot/wwwroot/console/
+*.tsbuildinfo
+.env*.local
 
 # Local state and secrets — never commit
 .devicecode.json

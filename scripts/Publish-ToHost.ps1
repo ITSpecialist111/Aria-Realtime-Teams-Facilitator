@@ -5,13 +5,19 @@ $rg = $env:RTBOT_RESOURCE_GROUP
 $vm = $env:RTBOT_VM_NAME
 if (-not $rg -or -not $vm) { throw 'Set RTBOT_RESOURCE_GROUP and RTBOT_VM_NAME (see scripts/deployment.example.ps1).' }
 
+if (Test-Path 'apps/aria-console/package.json') {
+    Write-Host '==> building apps/aria-console host bundle' -ForegroundColor Cyan
+    Push-Location 'apps/aria-console'
+    try { npm run build:host | Out-Host } finally { Pop-Location }
+}
+
 $stage = 'artifacts/src-stage'
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$stage/RtBot" | Out-Null
 
 $src = (Resolve-Path src/RtBot).Path
 Get-ChildItem $src -Recurse -File |
-    Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
+    Where-Object { $_.FullName -notmatch '\\(bin|obj|wwwroot)\\' } |
     ForEach-Object {
         $dest = Join-Path "$stage/RtBot" $_.FullName.Substring($src.Length + 1)
         New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
@@ -43,6 +49,35 @@ az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
     --scripts '@artifacts/push-src.ps1' -o json |
     ConvertFrom-Json | Select-Object -ExpandProperty value |
     Select-Object -ExpandProperty message
+
+if (Test-Path 'src/RtBot/wwwroot/console/index.html') {
+    Write-Host '==> uploading compiled companion console assets' -ForegroundColor Cyan
+    Compress-Archive -Path 'src/RtBot/wwwroot/console/*' -DestinationPath 'artifacts/console.zip' -Force
+    $consoleB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('artifacts/console.zip'))
+    $chunkSize = 180000
+    for ($offset = 0; $offset -lt $consoleB64.Length; $offset += $chunkSize) {
+        $len = [Math]::Min($chunkSize, $consoleB64.Length - $offset)
+        $slice = $consoleB64.Substring($offset, $len)
+        $mode = if ($offset -eq 0) { 'Set-Content' } else { 'Add-Content' }
+        $chunkScript = "$mode -Path 'C:\rtbot\console.b64' -Value '$slice' -NoNewline"
+        $chunkScript | Set-Content 'artifacts/push-console-chunk.ps1' -Encoding UTF8
+        az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
+            --scripts '@artifacts/push-console-chunk.ps1' -o none
+    }
+    $unpackConsole = @"
+`$ErrorActionPreference='Stop'
+[IO.File]::WriteAllBytes('C:\rtbot\console.zip', [Convert]::FromBase64String([IO.File]::ReadAllText('C:\rtbot\console.b64')))
+New-Item -ItemType Directory -Force -Path 'C:\rtbot\stage\wwwroot\console' | Out-Null
+Expand-Archive -Path 'C:\rtbot\console.zip' -DestinationPath 'C:\rtbot\stage\wwwroot\console' -Force
+Remove-Item 'C:\rtbot\console.b64','C:\rtbot\console.zip' -Force -EA SilentlyContinue
+Write-Output 'CONSOLE_ASSETS_OK'
+"@
+    $unpackConsole | Set-Content 'artifacts/unpack-console.ps1' -Encoding UTF8
+    az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `
+        --scripts '@artifacts/unpack-console.ps1' -o json |
+        ConvertFrom-Json | Select-Object -ExpandProperty value |
+        Select-Object -ExpandProperty message
+}
 
 Write-Host '==> restarting service' -ForegroundColor Cyan
 az vm run-command invoke -g $rg -n $vm --command-id RunPowerShellScript `

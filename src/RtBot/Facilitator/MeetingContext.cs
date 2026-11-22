@@ -40,6 +40,17 @@ public sealed record ActiveSkillBadge(
     DateTimeOffset ActivatedAt,
     bool Dynamic);
 
+public sealed record SkillChecklistState(string Item, bool Covered);
+
+public sealed record ActiveSkillDetail(
+    string Name,
+    string Label,
+    string Description,
+    DateTimeOffset ActivatedAt,
+    bool Dynamic,
+    IReadOnlyList<SkillChecklistState> Checklist,
+    IReadOnlyList<string> Track);
+
 /// <summary>A timestamped discussion topic milestone along the meeting timeline.</summary>
 public sealed record TopicMilestone(
     string Label,
@@ -246,6 +257,56 @@ public sealed class MeetingContext
                     return new ActiveSkillBadge(s.Name, Titleise(s.Name), s.Description, at, dynamic);
                 })];
             }
+        }
+    }
+
+    public IReadOnlyList<ActiveSkillDetail> ActiveSkillDetails
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _skills.Select(s =>
+                {
+                    (DateTimeOffset at, bool dynamic) = _skillMeta.TryGetValue(s.Name, out var m) ? m : (JoinedAt, false);
+                    return new ActiveSkillDetail(
+                        s.Name,
+                        Titleise(s.Name),
+                        s.Description,
+                        at,
+                        dynamic,
+                        [.. s.Checklist.Select(c => new SkillChecklistState(c, _covered.Contains(c)))],
+                        s.Track);
+                })];
+            }
+        }
+    }
+
+    private int _scribePassCount;
+    private int _workIqCallCount;
+    private double _workIqTotalMs;
+
+    public int ScribePassCount => Volatile.Read(ref _scribePassCount);
+    public int WorkIqCallCount => Volatile.Read(ref _workIqCallCount);
+    public int WorkIqAvgLatencyMs
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _workIqCallCount == 0 ? 0 : (int)Math.Round(_workIqTotalMs / _workIqCallCount);
+            }
+        }
+    }
+
+    public void RecordScribePass() => Interlocked.Increment(ref _scribePassCount);
+
+    public void RecordWorkIqCall(double elapsedMs)
+    {
+        lock (_gate)
+        {
+            _workIqCallCount++;
+            _workIqTotalMs += Math.Max(0, elapsedMs);
         }
     }
 
@@ -577,6 +638,19 @@ public sealed class MeetingContext
         }
     }
 
+    /// <summary>Resets item 0's clock when the first human arrives so empty-room wait time is not counted against the first timebox.</summary>
+    public void ResetInitialAgendaClockIfNoSpeech()
+    {
+        lock (_gate)
+        {
+            if (_agendaIndex == 0 && !_turns.Any(t => !t.IsAgent))
+            {
+                _agendaItemStartedAt = DateTimeOffset.UtcNow;
+                _overrunAnnouncedFor = -1;
+            }
+        }
+    }
+
     /// <summary>Closes the current item and starts the next. Returns the new current item, or null when the agenda is finished.</summary>
     public AgendaItem? AdvanceAgenda()
     {
@@ -809,6 +883,17 @@ public sealed class MeetingContext
         }
     }
 
+    public void MarkTurnsScribed(int throughTurn)
+    {
+        lock (_gate)
+        {
+            if (throughTurn > _scribedTurnCount)
+            {
+                _scribedTurnCount = Math.Min(throughTurn, _turns.Count);
+            }
+        }
+    }
+
     public IReadOnlyList<TranscriptTurn> RecentTurns(int count)
     {
         lock (_gate)
@@ -834,9 +919,11 @@ public sealed class MeetingContext
     public string RenderBriefing()
     {
         MeetingNotes notes = SnapshotNotes();
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
         StringBuilder sb = new();
 
         sb.Append("Meeting: ").AppendLine(string.IsNullOrWhiteSpace(Subject) ? "(untitled)" : Subject);
+        sb.Append("Current UTC: ").Append(nowUtc.ToString("yyyy-MM-dd HH:mm")).Append(" UTC (").Append(nowUtc.ToString("dddd")).AppendLine(")");
         sb.Append("Elapsed: ").Append((int)Elapsed.TotalMinutes).Append(" min");
 
         if (Remaining is { } remaining)
@@ -893,10 +980,13 @@ public sealed class MeetingContext
                 $"[{i.Kind}] {i.Title}: {i.Text}{(i.Citation is null ? string.Empty : $" (source: {i.Citation})")}")));
         }
 
-        IReadOnlyList<VisualNote> visuals = Visuals;
-        if (visuals.Count > 0)
+        if (!IsRestricted)
         {
-            sb.Append("Captured visuals: ").AppendLine(string.Join("; ", visuals.Select(v => $"{v.Title}: {v.Summary}")));
+            IReadOnlyList<VisualNote> visuals = Visuals;
+            if (visuals.Count > 0)
+            {
+                sb.Append("Captured visuals: ").AppendLine(string.Join("; ", visuals.Select(v => $"{v.Title}: {v.Summary}")));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(notes.Summary))

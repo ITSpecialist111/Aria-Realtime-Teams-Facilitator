@@ -33,6 +33,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private readonly BotChatClient _chat;
     private readonly MeetingDetailsLookup _details;
     private readonly MeetingMailer _mailer;
+    private readonly MeetingScheduler _scheduler;
     private readonly MeetingAgendaLoader _agendaLoader;
     private readonly SkillLibrary _skills;
     private readonly IReadOnlyList<MeetingSkill> _availableSkills;
@@ -69,7 +70,8 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     private bool _wrapUpAnnounced;
     private bool _externalAnnounced;
     private bool _recordingSet;
-    private bool _noticeGiven;
+    private volatile bool _noticeGiven;
+    private int _greetStarted;
 
     public CallHandler(
         ICall call,
@@ -79,6 +81,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         BotChatClient chat,
         MeetingDetailsLookup details,
         MeetingMailer mailer,
+        MeetingScheduler scheduler,
         MeetingAgendaLoader agendaLoader,
         SkillLibrary skills,
         RtBotOptions options,
@@ -90,6 +93,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         _chat = chat;
         _details = details;
         _mailer = mailer;
+        _scheduler = scheduler;
         _agendaLoader = agendaLoader;
         _skills = skills;
         _textModel = textModel;
@@ -137,11 +141,35 @@ public sealed class CallHandler : IMeetingActions, IDisposable
 
     public string AgentName => _options.Voice.AgentName;
 
+    public AgentPresence Presence => _bridge.Presence;
+
+    public bool IsAgentSpeaking => _bridge.IsAgentSpeaking;
+
+    public string? LatestCaption =>
+        !string.IsNullOrWhiteSpace(_caption) && DateTimeOffset.UtcNow - _captionAt < TimeSpan.FromSeconds(16)
+            ? _caption
+            : null;
+
     /// <summary>Link to this call's companion dashboard, or null when the public host is not configured.</summary>
-    private string? DashboardUrl =>
-        string.IsNullOrWhiteSpace(_options.Media.ServiceFqdn)
-            ? null
-            : $"https://{_options.Media.ServiceFqdn}{(_options.Media.SignalingPublicPort == 443 ? string.Empty : ":" + _options.Media.SignalingPublicPort)}/live/{Uri.EscapeDataString(_call.Id)}#k={Meeting.ViewKey}";
+    private string? DashboardUrl
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(_options.Media.ServiceFqdn))
+            {
+                return null;
+            }
+
+            string portSuffix = _options.Media.SignalingPublicPort == 443 ? string.Empty : ":" + _options.Media.SignalingPublicPort;
+            string hostOrigin = $"https://{_options.Media.ServiceFqdn.Trim()}{portSuffix}";
+            if (!string.IsNullOrWhiteSpace(_options.Avatar.CompanionAppUrl))
+            {
+                return $"{_options.Avatar.CompanionAppUrl.TrimEnd('/')}?host={Uri.EscapeDataString(hostOrigin)}&callId={Uri.EscapeDataString(_call.Id)}#k={Meeting.ViewKey}";
+            }
+
+            return $"{hostOrigin}/live/{Uri.EscapeDataString(_call.Id)}#k={Meeting.ViewKey}";
+        }
+    }
 
     public MeetingToolset Tools { get; }
 
@@ -261,8 +289,12 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         _inboundPump = Task.Run(() => PumpInboundAsync(_cts.Token), CancellationToken.None);
 
         await SetRecordingStatusAsync(RecordingStatus.Recording).ConfigureAwait(false);
-        await GreetAsync(cancellationToken).ConfigureAwait(false);
         await ApplyExternalPolicyAsync(cancellationToken).ConfigureAwait(false);
+        if (Meeting.Participants.Count > 0 &&
+            !(_facilitator.ExternalParticipants == ExternalParticipantPolicy.Leave && Meeting.HasExternalParticipants))
+        {
+            await GreetOnceAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         _facilitatorLoop = Task.Run(() => RunFacilitatorAsync(_cts.Token), CancellationToken.None);
 
@@ -282,8 +314,35 @@ public sealed class CallHandler : IMeetingActions, IDisposable
     public Task SkillsChangedAsync(CancellationToken cancellationToken) =>
         _bridge.RefreshSessionAsync(cancellationToken);
 
+    public async Task<ScheduledFollowUp> ScheduleFollowUpAsync(
+        string? subject,
+        double? startInMinutes,
+        string? startAtIso,
+        double durationMinutes,
+        IReadOnlyList<string> additionalAttendees,
+        IReadOnlyList<string> agendaItems,
+        CancellationToken cancellationToken)
+    {
+        ScheduledFollowUp booked = await _scheduler.ScheduleAsync(
+            Meeting, subject, startInMinutes, startAtIso, durationMinutes, additionalAttendees, agendaItems, cancellationToken).ConfigureAwait(false);
+
+        if (booked.Succeeded)
+        {
+            Meeting.AddDecision($"Follow-up booked: {booked.Summary}");
+            if (!string.IsNullOrWhiteSpace(booked.JoinUrl))
+            {
+                _ = PostToChatAsync(
+                    $"**Follow-up meeting scheduled:** {booked.Summary}  \n[Join link]({booked.JoinUrl})",
+                    _cts.Token);
+            }
+        }
+
+        return booked;
+    }
+
     private async Task ActOnScribeAsync(ScribeOutcome outcome, CancellationToken cancellationToken)
     {
+        Meeting.RecordScribePass();
         List<MeetingSkill> newlyActivated = [];
         foreach (string shift in outcome.SkillShifts)
         {
@@ -480,11 +539,13 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             {
                 using CancellationTokenSource retrieveTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 retrieveTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
                 try
                 {
                     string candidate = await Tools
                         .InvokeAsync("workiq_retrieve", JsonSerializer.Serialize(new { query = question }), retrieveTimeout.Token)
                         .ConfigureAwait(false);
+                    Meeting.RecordWorkIqCall(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                     if (!IsToolError(candidate) && !IsEmptyRetrieval(candidate))
                     {
                         raw = candidate;
@@ -500,9 +561,11 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             {
                 using CancellationTokenSource askTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 askTimeout.CancelAfter(TimeSpan.FromSeconds(65));
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
                 string candidate = await Tools
                     .InvokeAsync("workiq_ask", JsonSerializer.Serialize(new { question }), askTimeout.Token)
                     .ConfigureAwait(false);
+                Meeting.RecordWorkIqCall(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 if (!IsToolError(candidate))
                 {
                     raw = candidate;
@@ -524,6 +587,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
                 """
                 Turn M365 search passages or answers from Work IQ into a crisp, high-value card for a live meeting.
                 Return JSON: {"relevant": true|false, "title": "3-6 words", "text": "the concrete operational fact, deadline, SLA or policy rule in at most two short sentences", "source": "short title of the email, playbook, document or meeting it came from, if named, else null"}
+                Prefer authoritative playbooks, policies, contracts and operational reports. Ignore AI-generated 'Meeting recap:' emails unless QUERY specifically asks about a previous meeting; if only an AI meeting recap matched, set relevant to false.
                 Set relevant to false if the results are unrelated, empty, or say nothing was found.
                 """,
                 $"QUERY: {question}\nWORK IQ RESULTS:\n{(raw.Length > 8000 ? raw[..8000] : raw)}",
@@ -655,6 +719,56 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         await _call.DeleteAsync().ConfigureAwait(false);
     }
 
+    private readonly SemaphoreSlim _boardSummaryGate = new(1, 1);
+    private string? _cachedBoardSummary;
+    private DateTimeOffset _cachedBoardSummaryAt;
+    private bool _cachedBoardSummaryRestricted;
+
+    /// <summary>Synthesises a concise 20-second spoken executive summary from the live meeting board (throttled to 1 synthesis per 20 s).</summary>
+    public async Task<string> SynthesiseBoardSummaryAsync(CancellationToken cancellationToken)
+    {
+        MeetingNotes notes = Meeting.SnapshotNotes();
+        if (_textModel is null)
+        {
+            return !string.IsNullOrWhiteSpace(notes.Summary)
+                ? notes.Summary
+                : $"We are {Math.Max(1, (int)Meeting.Elapsed.TotalMinutes)} minutes into {Meeting.Subject ?? "the session"} with {notes.Decisions.Count} locked decisions and {notes.Actions.Count} assigned actions.";
+        }
+
+        await _boardSummaryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            bool restrictedNow = Meeting.IsRestricted;
+            if (!string.IsNullOrWhiteSpace(_cachedBoardSummary) &&
+                _cachedBoardSummaryRestricted == restrictedNow &&
+                DateTimeOffset.UtcNow - _cachedBoardSummaryAt < TimeSpan.FromSeconds(20))
+            {
+                return _cachedBoardSummary;
+            }
+
+            JsonNode? result = await _textModel.CompleteJsonAsync(
+                _facilitator.ScribeModel,
+                """
+                Write a crisp 20-second spoken executive status summary (45 to 65 words, natural British English, no bullet points, no markdown) for Aria, the AI meeting facilitator.
+                State current alignment, key locked decisions or active risks, and the single highest-priority next action.
+                Return JSON: {"speech": "..."}
+                """,
+                Meeting.RenderBriefing(),
+                cancellationToken).ConfigureAwait(false);
+
+            string? speech = result?["speech"]?.GetValue<string>();
+            string resolved = !string.IsNullOrWhiteSpace(speech) ? speech : notes.Summary;
+            _cachedBoardSummary = resolved;
+            _cachedBoardSummaryAt = DateTimeOffset.UtcNow;
+            _cachedBoardSummaryRestricted = restrictedNow;
+            return resolved;
+        }
+        finally
+        {
+            _boardSummaryGate.Release();
+        }
+    }
+
     /// <summary>Operator-injected prompt.</summary>
     public Task SayAsync(string text, CancellationToken cancellationToken) =>
         _bridge.SayAsync(text, cancellationToken);
@@ -678,8 +792,14 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         Meeting.ScheduledEnd = end;
     }
 
+    private Task GreetOnceAsync(CancellationToken cancellationToken) =>
+        Interlocked.CompareExchange(ref _greetStarted, 1, 0) == 0
+            ? GreetAsync(cancellationToken)
+            : Task.CompletedTask;
+
     private async Task GreetAsync(CancellationToken cancellationToken)
     {
+        Meeting.ResetInitialAgendaClockIfNoSpeech();
         if (!_facilitator.AnnounceOnJoin)
         {
             return;
@@ -740,7 +860,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             await ActOnScribeAsync(outcome, cancellationToken).ConfigureAwait(false);
         }
 
-        if (_facilitator.ProactiveTimeChecks && Meeting.TryClaimOverrun(out AgendaItem? overrun) && overrun is not null)
+        if (_facilitator.ProactiveTimeChecks && Meeting.Participants.Count > 0 && Meeting.TryClaimOverrun(out AgendaItem? overrun) && overrun is not null)
         {
             AgendaItem? next = Meeting.SnapshotAgenda().Next;
             string ask = next is null
@@ -749,7 +869,7 @@ public sealed class CallHandler : IMeetingActions, IDisposable
             await _bridge.AnnounceAsync($"Politely say the timebox for '{overrun.Title}' is up, {ask}", cancellationToken).ConfigureAwait(false);
         }
 
-        if (_facilitator.ProactiveTimeChecks && Meeting.ScheduledStart is { } start && Meeting.ScheduledEnd is { } end && end > start)
+        if (_facilitator.ProactiveTimeChecks && Meeting.Participants.Count > 0 && Meeting.ScheduledStart is { } start && Meeting.ScheduledEnd is { } end && end > start)
         {
             TimeSpan length = end - start;
 
@@ -778,15 +898,23 @@ public sealed class CallHandler : IMeetingActions, IDisposable
         if (Meeting.Participants.Count == 0)
         {
             _aloneSince ??= now;
-            if (now - _aloneSince.Value >= TimeSpan.FromSeconds(_facilitator.LeaveWhenAloneSeconds))
+            TimeSpan patience = Meeting.Attendees.Count == 0
+                ? TimeSpan.FromMinutes(_facilitator.WaitForFirstAttendeeMinutes)
+                : TimeSpan.FromSeconds(_facilitator.LeaveWhenAloneSeconds);
+            if (now - _aloneSince.Value >= patience)
             {
-                _logger.LogInformation("Nobody left in the meeting; leaving.");
+                _logger.LogInformation("Nobody in the meeting after {Seconds}s; leaving.", (int)(now - _aloneSince.Value).TotalSeconds);
                 await LeaveAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         else
         {
             _aloneSince = null;
+            if (!(_facilitator.ExternalParticipants == ExternalParticipantPolicy.Leave && Meeting.HasExternalParticipants) &&
+                !_cts.IsCancellationRequested)
+            {
+                await GreetOnceAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -1040,10 +1168,16 @@ public sealed class CallHandler : IMeetingActions, IDisposable
                 try
                 {
                     await ApplyExternalPolicyAsync(_cts.Token).ConfigureAwait(false);
+                    if (Meeting.Participants.Count > 0 &&
+                        !(_facilitator.ExternalParticipants == ExternalParticipantPolicy.Leave && Meeting.HasExternalParticipants) &&
+                        !_cts.IsCancellationRequested)
+                    {
+                        await GreetOnceAsync(_cts.Token).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogWarning(ex, "Applying the external-participant policy failed.");
+                    _logger.LogWarning(ex, "Applying participant update failed.");
                 }
             });
         }

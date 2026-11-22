@@ -82,8 +82,8 @@ The clip shows the spoken introduction, answering when addressed by name, and th
 | **Knows who is talking** | Each utterance is attributed to the Teams dominant speaker. Attendee names feed the recogniser's phrase list. |
 | **Meeting memory** | A text model folds the conversation into running notes every 15 s: summary, decisions, action items, open questions and an alignment score. Every reply carries a fresh briefing with who is speaking, time elapsed and remaining, and the notes. |
 | **Live panel** | The tile and a companion browser dashboard show alignment, speaking share, a feed of skill, risk and Work IQ insights, and the notes, updating as people talk. Nobody has to @mention anything: Aria raises what matters on screen, not in the chat. |
-| **Companion dashboard** | Aria posts a link in the meeting chat to `/live/<callId>`. It shows the live intelligence feed (`All`, `Work IQ`, `Skills` and `Risks` filters), structured **Outcomes**, the live transcript, alignment, voices and active skills (with light/dark toggle). Access is by an unguessable per-call key in the link fragment, sent as a header; it stops working when the call ends, and organisation-sourced findings are hidden while an external guest is present. |
-| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `show_on_screen`, `look_at`, `capture_visual`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
+| **Companion workspace (Copilot Managed Runtime + D-ID + GSAP)** | `apps/aria-console` is a React 19 + TypeScript + Tailwind v4 + GSAP (`Flip` + `quickSetter`) companion workspace built on the **Microsoft Copilot Managed Runtime SDK** (`@microsoft/cmr-apps`) and infused with the **D-ID Agents SDK** (`@d-id/client-sdk`). It pairs a calm Swiss Clinical Editorial overview (Warm Alabaster Paper & Deep Obsidian) with progressive unfolding: click any single-line insight to GSAP-`Flip` unfold verbatim M365 citations and a 3-node provenance trace, scrub clickable timeline milestones, inspect camera/whiteboard topology on the **Spatial Evidence Canvas**, stream a lip-synced **D-ID Humanoid Avatar** (`en-GB-SoniaNeural`, with zero-cost 60fps GSAP Radial Voice Aura fallback), and open the **Executive FinOps Drawer** (*"What's the cost of this?"*) for live unit economics (`$0.018/min` core Voice+IQ) and an interactive 100-seat monthly TCO model. |
+| **Facilitator tools** | `set_agenda`, `next_agenda_item`, `extend_agenda_item`, `park_topic`, `set_timer`, `record_action_item`, `record_decision`, `track_item`, `mark_covered`, `activate_skill`, `schedule_followup_meeting`, `show_on_screen`, `look_at`, `capture_visual`, `get_meeting_status`, `post_to_meeting_chat`, `post_recap_now`, `leave_meeting`, plus every Work IQ MCP tool. |
 | **Video tile** | A rendered 1280×720 or 640×360 NV12 stream (whichever Teams asks for) replaces the default bot placeholder. It shows presence, clock, agenda timebox, timer, tallies, captions and the active specialisms. Frames are only rendered while someone is viewing. |
 | **Agenda from the invite** | At join, Aria finds the meeting in the agent account's calendar, extracts the agenda and timeboxes from the invite text, and starts the first item. |
 | **Live insights** | Each scribe pass can raise up to three insights (skill, risk, alignment, facilitation, pace), tagged by source and severity on the tile. When the conversation moves into another domain, Aria switches on the matching specialist skill on screen automatically. |
@@ -527,11 +527,40 @@ All settings are under `RtBot` in [`appsettings.json`](src/RtBot/appsettings.jso
 | `Facilitator:PostRecapOnEnd` | `true` | Chat recap. |
 | `Facilitator:EmailRecapOnEnd` | `true` | Email report to internal attendees. |
 | `Facilitator:MinTurnsForEmail` | `3` | Skip email for empty or test calls. |
-| `Facilitator:LeaveWhenAloneSeconds` | `60` | Auto-leave. |
+| `Facilitator:LeaveWhenAloneSeconds` | `60` | Auto-leave once attendees have arrived and subsequently left. |
+| `Facilitator:WaitForFirstAttendeeMinutes` | `15` | Pre-arrival grace window when Aria joins an empty meeting room early. |
 | `Facilitator:Profile` | `default` | Instance profile (`profiles/<name>.md`). Plain name only. |
 | `Facilitator:CustomSkillsPath` | `C:\rtbot\skills` | Custom skills and profiles; overrides built-ins by name. |
+| `Avatar:ApiKeyFile` | `C:\rtbot\state\did.secret` | DPAPI-encrypted D-ID Basic API key used to mint 1-hour domain-scoped client keys. |
+| `Avatar:VoiceId` | `en-GB-SoniaNeural` | Azure neural voice matched between Teams audio and D-ID WebRTC video. |
+| `Avatar:CompanionAppUrl` | | Optional Copilot Managed Runtime App Player URL (`https://play.managedapps.cloud.microsoft/apps/<appId>`). |
 | `Observability:EnableAgent365` | `false` | Agent 365 export. |
 | `Observability:ApplicationInsightsConnectionString` | | Optional second sink. |
+
+---
+
+## Copilot Managed Runtime & D-ID Humanoid Avatar (`apps/aria-console`)
+
+The companion experience in [`apps/aria-console`](apps/aria-console) runs both inside **Microsoft Copilot Managed Runtime (CMR)** (`@microsoft/cmr-apps` + `@microsoft/cmr-apps-vite-plugin`) and directly on the media host at `/live/<callId>`.
+
+```powershell
+# 1. Local development in Vite or Copilot Managed Runtime App Player
+cd apps/aria-console
+npm install
+npm run dev
+
+# 2. Onboard & run in the Copilot Managed Runtime App Player (requires tenant sign-in)
+npm install -g @microsoft/cmr-cli@latest
+ms auth login
+ms app init --display-name "Aria Executive Companion"
+ms app dev
+
+# 3. Optional: encrypt your D-ID API key into Windows DPAPI on vm-rtbot (never stored in git or browser bundles)
+cd ../..
+./scripts/Set-DidAvatarKey.ps1
+```
+
+When no D-ID key is present, `PresenceStage` runs the zero-cost **60fps GSAP SVG Radial Voice Aura** automatically. When `did.secret` is configured on the host, `POST /api/avatar/session` mints a short-lived (`3600 s`), origin-locked D-ID `client_key` (never exposing your Basic API key to the browser) and streams lip-synced WebRTC video in `en-GB-SoniaNeural`.
 
 ---
 
@@ -550,6 +579,7 @@ In a meeting:
 
 - *"Aria, what meetings do I have with Contoso this week?"* (Work IQ)
 - *"Aria, note that Sam will send the deck by Friday."* (action item)
+- *"Aria, schedule a 25-minute follow-up with this group tomorrow at 10am."* (Graph calendar + Teams link)
 - *"Aria, how long have we got?"*
 - *"Aria, set a five-minute timer."*
 - *"Aria, our agenda is status for ten minutes, budget for five, then risks."*
@@ -566,12 +596,13 @@ In a meeting:
 ## Repository layout
 
 ```
-src/RtBot/                 the service
+apps/aria-console/         Copilot Managed Runtime + D-ID + GSAP companion workspace
+src/RtBot/                 the real-time Teams calling & media service
   Chat/                    Bot Connector client
   Configuration/           options, DPAPI secret file
-  Controllers/             calling webhook, chat messages, operator API, diagnostics
-  Facilitator/             meeting context, scribe, tools, mailer, text model client
-  Media/                   audio pacing and buffers
+  Controllers/             calling webhook, chat messages, live companion & D-ID session API
+  Facilitator/             meeting context, scribe, scheduler, tools, mailer, text model client
+  Media/                   audio pacing, NV12 video tile renderer and buffers
   Observability/           Agent 365 / OpenTelemetry helpers
   Teams/                   calling service, call handler, meeting lookup, join URL parser
   Tools/                   MCP catalogue, delegated tokens, token stores
@@ -579,10 +610,17 @@ src/RtBot/                 the service
   skills/                  built-in SKILL.md files and profiles/
 tools/RtBot.Verify/        CLI checks for Voice Live, transcription pairings and Work IQ
 infra/main.bicep           Azure infrastructure
-scripts/                   host setup, deploy, Work IQ sign-in, operator CLI
+scripts/                   host setup, deploy, Work IQ sign-in, D-ID key encryption, operator CLI
 teams-app/                 Teams app manifest template and icons
 docs/ARCHITECTURE.md       decision record and audio-path detail
 ```
+
+---
+
+## Roadmap
+
+- **Copilot Managed Runtime Code Agents (`aka.ms/cmrcodeagents-signup`).** Today, GA **CMR Managed Apps** hosts Aria's executive companion UI (`apps/aria-console`) with zero Azure App Service cost, while the Windows media host handles stateful `Microsoft.Skype.Bots.Media` RTP audio/video sockets (`TCP 8445`). Once **CMR Code Agents** exits gated preview, stateless companion agents — pre-meeting briefing packs, post-meeting action chasers, and asynchronous Teams/M365 Copilot chat queries — can move onto CMR Code Agents alongside the Managed App, leaving the Windows VM exclusively for live call RTP media.
+- **Per-turn OpenTelemetry GenAI spans.** Enrich Agent 365 exports with token-level cost attribution per spoken turn and Work IQ retrieval.
 
 ---
 

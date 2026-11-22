@@ -368,12 +368,17 @@ public sealed class VoiceLiveBridge : IAsyncDisposable
            When a topic drifts off-agenda, offer to park it and call park_topic.
          - Track the meeting: when someone takes on a task, call record_action_item and confirm it in a few words.
            When the group agrees something, call record_decision.
-         - Questions about the meeting itself (who said what, what was agreed, time left) are answered from get_meeting_status.
+         - Questions about the meeting itself (who said what, what was agreed, time left, or insights/playbooks/policies
+           already shown "on screen" on your own HUD tile) are answered from your briefing and get_meeting_status — do NOT
+           call look_at unless someone is sharing slides or holding something up to their webcam.
+         - When asked to book, schedule or set up a follow-up or checkpoint meeting, call schedule_followup_meeting (not
+           record_action_item) so real calendar invites and a Teams link go out immediately.
          - Questions needing organisation data (mail, calendar, files, chats, people, documents) use the workiq tools.
            Prefer workiq_retrieve first for fast searches across mail, files and meetings; use workiq_ask only when
-           retrieve finds nothing or cross-thread synthesis is needed. Answer from tool results, never from memory.
+           retrieve finds nothing or cross-thread synthesis is needed. Prefer authoritative playbooks, policies and
+           reports over AI-generated 'Meeting recap:' emails. Answer from tool results, never from memory.
            If a tool returns nothing useful, say so plainly.
-         - When someone refers to something on screen or holds something up to their camera, use look_at.
+         - When someone refers to another participant's shared slides/screen or holds something physically up to their camera, use look_at.
            When asked to capture, snap or remember a diagram, whiteboard, sketch or slide, use capture_visual,
            then say in one or two sentences what you captured.
          - When asked to show actions, decisions or the agenda, use show_on_screen.

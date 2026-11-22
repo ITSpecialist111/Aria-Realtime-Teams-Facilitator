@@ -1,0 +1,146 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+:root {
+  --bg-canvas: oklch(0.982 0.004 85);
+  --bg-surface: oklch(1 0 0);
+  --bg-elevated: oklch(0.962 0.005 85);
+  --bg-subtle: oklch(0.946 0.006 85);
+  --border-hairline: oklch(0.892 0.008 85);
+  --border-strong: oklch(0.805 0.012 85);
+  --text-primary: oklch(0.185 0.012 255);
+  --text-secondary: oklch(0.435 0.014 255);
+  --text-muted: oklch(0.565 0.012 255);
+  --accent-cobalt: oklch(0.535 0.195 258);
+  --accent-emerald: oklch(0.585 0.155 162);
+  --accent-amber: oklch(0.665 0.165 68);
+  --accent-crimson: oklch(0.565 0.205 25);
+  --accent-violet: oklch(0.535 0.185 292);
+  color-scheme: light;
+}
+
+html.dark {
+  --bg-canvas: oklch(0.145 0.008 255);
+  --bg-surface: oklch(0.182 0.01 255);
+  --bg-elevated: oklch(0.218 0.012 255);
+  --bg-subtle: oklch(0.248 0.013 255);
+  --border-hairline: oklch(0.268 0.012 255);
+  --border-strong: oklch(0.355 0.016 255);
+  --text-primary: oklch(0.955 0.005 255);
+  --text-secondary: oklch(0.715 0.012 255);
+  --text-muted: oklch(0.545 0.012 255);
+  --accent-cobalt: oklch(0.645 0.185 256);
+  --accent-emerald: oklch(0.695 0.155 162);
+  --accent-amber: oklch(0.765 0.155 74);
+  --accent-crimson: oklch(0.655 0.195 25);
+  --accent-violet: oklch(0.675 0.175 292);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: -0.011em;
+}
+
+.font-mono-tabular {
+  font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Single-shot sweep for newly activated autonomous skills (Swap S1) */
+@keyframes skillSweepOnce {
+  0% {
+    background-position: -180% 0;
+  }
+  100% {
+    background-position: 220% 0;
+  }
+}
+
+.skill-sweep-once {
+  background-image: linear-gradient(
+    110deg,
+    transparent 25%,
+    color-mix(in oklch, var(--accent-cobalt) 22%, transparent) 50%,
+    transparent 75%
+  );
+  background-size: 200% 100%;
+  animation: skillSweepOnce 1.9s cubic-bezier(0.22, 1, 0.36, 1) 1 forwards;
+}
+
+/* Active-only border beam on PresenceStage when speaking or querying M365 */
+@keyframes stageBeamSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.stage-beam-active::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    transparent 250deg,
+    var(--accent-cobalt) 315deg,
+    var(--accent-violet) 348deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.stage-beam-motion::before {
+  animation: stageBeamSpin 4.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-sweep-once,
+  .stage-beam-motion::before {
+    animation: none !important;
+  }
+}
+
+/* Subtle editorial scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-hairline);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
